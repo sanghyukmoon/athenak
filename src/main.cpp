@@ -343,6 +343,11 @@ int main(int argc, char *argv[]) {
   Driver* pdriver = new Driver(pinput, pmesh, wtlim, &timer);
   Outputs* pout = new Outputs(pinput, pmesh);
 
+  // Dump input parameters to stdout
+  if (global_variable::my_rank == 0) {
+    pinput->ParameterDump(std::cout);
+  }
+
   //--- Step 7. --------------------------------------------------------------------------
   // Execute Driver.
   //    1. Initial conditions set in Driver::Initialize()
