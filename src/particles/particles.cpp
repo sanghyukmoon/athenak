@@ -42,7 +42,7 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
 
   // select particle type
   {
-    std::string ptype = pin->GetString("particles","particle_type");
+    std::string ptype = pin->GetString("particles","type");
     if (ptype.compare("cosmic_ray") == 0) {
       particle_type = ParticleType::cosmic_ray;
     } else {

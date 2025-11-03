@@ -40,7 +40,7 @@ tlim       = 0.25      # time limit
 ndiag      = 1         # cycles between diagostic output
 
 <particles>
-particle_type = cosmic_ray
+type = cosmic_ray
 ppc    = 0.01
 pusher = drift
 
