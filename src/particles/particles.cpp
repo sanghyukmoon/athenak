@@ -60,6 +60,8 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     std::string ppush = pin->GetString("particles","pusher");
     if (ppush.compare("drift") == 0) {
       pusher = ParticlesPusher::drift;
+    } else if (ppush.compare("leapfrog") == 0) {
+      pusher = ParticlesPusher::leapfrog;
     } else {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "Particle pusher must be specified in <particles> block"

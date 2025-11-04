@@ -31,24 +31,33 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
 
   switch (pusher) {
     case ParticlesPusher::drift:
-
       par_for("part_update",DevExeSpace(),0,(nprtcl_thispack-1),
       KOKKOS_LAMBDA(const int p) {
         //int m = pi(PGID,p) - gids;
         //int ip = (pr(IPX,p) - mbsize.d_view(m).x1min)/mbsize.d_view(m).dx1 + is;
         pr(IPX,p) += 0.5*dt_*pr(IPVX,p);
-
         if (multi_d) {
           //int jp = (pr(IPY,p) - mbsize.d_view(m).x2min)/mbsize.d_view(m).dx2 + js;
           pr(IPY,p) += 0.5*dt_*pr(IPVY,p);
         }
-
         if (three_d) {
           //int kp = (pr(IPZ,p) - mbsize.d_view(m).x3min)/mbsize.d_view(m).dx3 + ks;
           pr(IPZ,p) += 0.5*dt_*pr(IPVZ,p);
         }
       });
-
+    case ParticlesPusher::leapfrog:
+      if (stage == 1) {
+        par_for("part_update",DevExeSpace(),0,(nprtcl_thispack-1),
+        KOKKOS_LAMBDA(const int p) {
+          // Step 1. Opening kick from v^n to v^(n+1/2)
+          // Step 2. Drift from x^n to x^(n+1)
+        });
+      } else if (stage == 2) {
+        par_for("part_update",DevExeSpace(),0,(nprtcl_thispack-1),
+        KOKKOS_LAMBDA(const int p) {
+          // Step 3. Closing kick from v^(n+1/2) to v^(n+1)
+        });
+      }
     break;
   default:
     break;
