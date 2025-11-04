@@ -45,6 +45,8 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     std::string ptype = pin->GetString("particles","type");
     if (ptype.compare("cosmic_ray") == 0) {
       particle_type = ParticleType::cosmic_ray;
+    } else if (ptype.compare("sink") == 0) {
+      particle_type = ParticleType::sink;
     } else {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "Particle type = '" << ptype << "' not recognized"
@@ -79,6 +81,14 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
         if (pmy_pack->pmesh->three_d) {ndim+=2;}
         nrdata = ndim;
         nidata = 2;
+        break;
+      }
+    case ParticleType::sink:
+      {
+        int ndim=5; // x, y, vx, vy, mass
+        if (pmy_pack->pmesh->three_d) {ndim+=2;} // z, vz
+        nrdata = ndim;
+        nidata = 2; // gid, tag
         break;
       }
     default:
