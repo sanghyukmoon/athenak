@@ -28,6 +28,7 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
   auto &pr = prtcl_rdata;
   auto dt_ = (pmy_pack->pmesh->dt);
   //auto gids = pmy_pack->gids;
+  auto hdt_ = 0.5*dt_;
 
   switch (pusher) {
     case ParticlesPusher::drift:
@@ -35,14 +36,14 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
       KOKKOS_LAMBDA(const int p) {
         //int m = pi(PGID,p) - gids;
         //int ip = (pr(IPX,p) - mbsize.d_view(m).x1min)/mbsize.d_view(m).dx1 + is;
-        pr(IPX,p) += 0.5*dt_*pr(IPVX,p);
+        pr(IPX,p) += hdt_*pr(IPVX,p);
         if (multi_d) {
           //int jp = (pr(IPY,p) - mbsize.d_view(m).x2min)/mbsize.d_view(m).dx2 + js;
-          pr(IPY,p) += 0.5*dt_*pr(IPVY,p);
+          pr(IPY,p) += hdt_*pr(IPVY,p);
         }
         if (three_d) {
           //int kp = (pr(IPZ,p) - mbsize.d_view(m).x3min)/mbsize.d_view(m).dx3 + ks;
-          pr(IPZ,p) += 0.5*dt_*pr(IPVZ,p);
+          pr(IPZ,p) += hdt_*pr(IPVZ,p);
         }
       });
     case ParticlesPusher::leapfrog:
