@@ -37,6 +37,7 @@ SourceTerms::SourceTerms(std::string block, MeshBlockPack *pp, ParameterInput *p
     pmy_pack(pp) {
   // Read flags for each source term implemented (default false)
   const_accel = pin->GetOrAddBoolean(block, "const_accel", false);
+  point_mass = pin->GetOrAddBoolean(block, "point_mass", false);
   ism_cooling = pin->GetOrAddBoolean(block, "ism_cooling", false);
   rel_cooling = pin->GetOrAddBoolean(block, "rel_cooling", false);
   rad_beam = pin->GetOrAddBoolean(block, "rad_beam", false);
@@ -52,18 +53,23 @@ SourceTerms::SourceTerms(std::string block, MeshBlockPack *pp, ParameterInput *p
     }
   }
 
-  // (2) Optically thin ISM cooling
+  // (2) read data for point-mass gravity
+  if (point_mass) {
+    point_mass_gm = pin->GetReal(block, "point_mass_gm");
+  }
+
+  // (3) Optically thin ISM cooling
   if (ism_cooling) {
     hrate = pin->GetReal(block, "hrate");
   }
 
-  // (3) optically thin relativistic cooling
+  // (4) optically thin relativistic cooling
   if (rel_cooling) {
     crate_rel = pin->GetReal(block, "crate_rel");
     cpower_rel = pin->GetOrAddReal(block, "cpower_rel", 1.);
   }
 
-  // (4) radiation beam source (radiation)
+  // (5) radiation beam source (radiation)
   if (rad_beam) {
     dii_dt = pin->GetReal(block, "dii_dt");
     pos1 = pin->GetReal(block, "pos_1");
@@ -92,6 +98,7 @@ void SourceTerms::ApplySrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos
                                 const Real bdt, DvceArray5D<Real> &u0) {
   // NOTE source terms must be computed using primitive (w0) and NOT conserved (u0) vars
   if (const_accel) ConstantAccel(w0, eos_data,  bdt, u0);
+  if (point_mass) PointMass(w0, eos_data,  bdt, u0);
   if (ism_cooling) ISMCooling(w0, eos_data, bdt, u0);
   if (rel_cooling) RelCooling(w0, eos_data, bdt, u0);
   return;
@@ -123,6 +130,52 @@ void SourceTerms::ConstantAccel(const DvceArray5D<Real> &w0, const EOS_Data &eos
     Real src = bdt*g*w0(m,IDN,k,j,i);
     u0(m,dir,k,j,i) += src;
     if (eos_data.is_ideal) { u0(m,IEN,k,j,i) += src*w0(m,dir,k,j,i); }
+  });
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn SourceTerms::PointMass
+//! \brief Add point-mass gravity
+//! NOTE source terms must be computed using primitive (w0) and NOT conserved (u0) vars
+
+void SourceTerms::PointMass(const DvceArray5D<Real> &w0, const EOS_Data &eos_data,
+                            const Real bdt, DvceArray5D<Real> &u0) {
+  if (eos_data.is_ideal) {
+    std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
+              << "point mass gravity only works with isothermal EOS" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int nmb1 = pmy_pack->nmb_thispack - 1;
+
+  auto &size = pmy_pack->pmb->mb_size;
+
+  Real &gm_ = point_mass_gm;
+
+  par_for("point_mass", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real r3 = pow(SQR(x1v) + SQR(x2v) + SQR(x3v), 1.5);
+    Real src = -bdt*gm_/r3*w0(m,IDN,k,j,i);
+    u0(m,IM1,k,j,i) += src*x1v;
+    u0(m,IM2,k,j,i) += src*x2v;
+    u0(m,IM3,k,j,i) += src*x3v;
   });
 
   return;

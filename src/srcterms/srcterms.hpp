@@ -31,6 +31,7 @@ class SourceTerms {
   // data
   // flags for various source terms
   bool const_accel;
+  bool point_mass;
   bool ism_cooling;
   bool rel_cooling;
   bool rad_beam;
@@ -41,6 +42,9 @@ class SourceTerms {
   // data for constant accel
   Real const_accel_val;   // magnitude of accn
   int const_accel_dir;    // direction of accn
+
+  // data for point mass gravity
+  Real point_mass_gm;  // product of gravitational constant and mass
 
   // data for ISM cooling
   Real hrate;
@@ -61,6 +65,8 @@ class SourceTerms {
   void ApplySrcTerms(DvceArray5D<Real> &i0, const Real bdt);
   void ConstantAccel(const DvceArray5D<Real> &w0, const EOS_Data &eos,
                      const Real bdt, DvceArray5D<Real> &u0);
+  void PointMass(const DvceArray5D<Real> &w0, const EOS_Data &eos,
+                 const Real bdt, DvceArray5D<Real> &u0);
   void ISMCooling(const DvceArray5D<Real> &w0, const EOS_Data &eos,
                   const Real bdt, DvceArray5D<Real> &u0);
   void RelCooling(const DvceArray5D<Real> &w0, const EOS_Data &eos,
