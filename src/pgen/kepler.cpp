@@ -18,6 +18,8 @@
 //! \brief Problem Generator for random particle positions/velocities
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+  // TODO(SMOON) consider making this a regression test
+  // Once self-gravity included, we can change this to binary test in Gong13
   if (restart) return;
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
