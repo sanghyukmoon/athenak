@@ -204,7 +204,7 @@ def clean_make(threads: int = os.cpu_count(), **kwargs) -> None:
     """
     clean()
     cmake(**kwargs)
-    make(threads=threads)
+    make(threads=8)
     logging.info("Build directory cleaned and project rebuilt")
     run_command(["ln", "-s", "../../inputs", "inputs"])
 
