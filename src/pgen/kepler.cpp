@@ -90,8 +90,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Assumes uniform mesh (no SMR or AMR)
   // Assumes velocities normalized to one, so dt=min(dx)
   Real &dtnew_ = pmbp->ppart->dtnew;
-  dtnew_ = std::min(mbsize.h_view(0).dx1, mbsize.h_view(0).dx2);
-  dtnew_ = std::min(dtnew_, mbsize.h_view(0).dx3);
+  dtnew_ = 2*M_PI/1000;
 
   return;
 }

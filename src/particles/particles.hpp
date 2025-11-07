@@ -60,6 +60,7 @@ class Particles {
   Real dtnew;
 
   ParticlesPusher pusher;
+  Real point_mass_gm;  // temporary treatment of source term on particle
 
   // Boundary communication buffers and functions for particles
   ParticlesBoundaryValues *pbval_part;

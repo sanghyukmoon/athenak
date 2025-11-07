@@ -70,6 +70,10 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     }
   }
 
+  // TODO(SMOON) This is temporary treatment of source term on particle.
+  // Later, we need to implement a more general way to include source terms
+  point_mass_gm = pin->GetOrAddReal("particles","point_mass_gm",0.0);
+
   // set dimensions of particle arrays. Note particles only work in 2D/3D
   if (pmy_pack->pmesh->one_d) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
