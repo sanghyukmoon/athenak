@@ -21,3 +21,16 @@ tst/test_log.txt
 *~
 *.swp
 Lorene
+
+# cscope and ctags files
+cscope.out
+tags
+
+# python cache files
+__pycache__/
+
+# mamba environment file
+env.yml
+
+# test log file
+tst/test_log.txt
