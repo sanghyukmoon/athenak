@@ -106,8 +106,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // set user-defined BCs and error function pointers
+  user_bcs_func = FixedBondiInflow;
   // TODO(SMOON): implement these two functions
-//  user_bcs_func = FixedBondiInflow;
 //  pgen_final_func = BondiErrors;
   if (restart) return;
 
@@ -216,7 +216,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     Real rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
-
     InterpolateFromTable(rad, vr, rho);
 
     // decompose to Cartesian
@@ -240,6 +239,161 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
   }
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn FixedBondiInflow
+//  \brief Sets boundary condition on surfaces of computational domain
+// Note quantities at boundaryies are held fixed to initial condition values
+
+void FixedBondiInflow(Mesh *pm) {
+  auto &indcs = pm->mb_indcs;
+  auto &size = pm->pmb_pack->pmb->mb_size;
+  auto &coord = pm->pmb_pack->pcoord->coord_data;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
+  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
+
+  int nmb = pm->pmb_pack->nmb_thispack;
+  DvceArray5D<Real> u0_ = pm->pmb_pack->phydro->u0;
+  DvceArray5D<Real> w0_ = pm->pmb_pack->phydro->w0;
+
+  // x1 boundaries
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+  par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    // inner x1 boundary
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,k,j,i) = rho;
+      w0_(m,IVX,k,j,i) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,k,j,i) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,k,j,i) = vr * ((x3v - zc) / rad);
+    }
+
+    // outer x1 boundary
+    x1v = CellCenterX((ie+i+1)-is, indcs.nx1, x1min, x1max);
+    rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,k,j,(ie+i+1)) = rho;
+      w0_(m,IVX,k,j,(ie+i+1)) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,k,j,(ie+i+1)) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,k,j,(ie+i+1)) = vr * ((x3v - zc) / rad);
+    }
+  });
+  // PrimToCons on X1 physical boundary ghost zones
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+
+  // x2 boundary
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
+  par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    // inner x2 boundary
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,k,j,i) = rho;
+      w0_(m,IVX,k,j,i) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,k,j,i) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,k,j,i) = vr * ((x3v - zc) / rad);
+    }
+
+    // outer x2 boundary
+    x2v = CellCenterX((je+j+1)-js, indcs.nx2, x2min, x2max);
+    rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,k,(je+j+1),i) = rho;
+      w0_(m,IVX,k,(je+j+1),i) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,k,(je+j+1),i) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,k,(je+j+1),i) = vr * ((x3v - zc) / rad);
+    }
+  });
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+
+  // x3 boundaries
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    // inner x3 boundary
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,k,j,i) = rho;
+      w0_(m,IVX,k,j,i) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,k,j,i) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,k,j,i) = vr * ((x3v - zc) / rad);
+    }
+
+    // outer x3 boundary
+    x3v = CellCenterX((ke+k+1)-ks, indcs.nx3, x3min, x3max);
+    Real rad = std::sqrt(SQR(x1v-xc) + SQR(x2v-yc) + SQR(x3v-zc));
+
+    if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+      InterpolateFromTable(rad, vr, rho);
+      w0_(m,IDN,(ke+k+1),j,i) = rho;
+      w0_(m,IVX,(ke+k+1),j,i) = vr * ((x1v - xc) / rad);
+      w0_(m,IVY,(ke+k+1),j,i) = vr * ((x2v - yc) / rad);
+      w0_(m,IVZ,(ke+k+1),j,i) = vr * ((x3v - zc) / rad);
+    }
+  });
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
 
   return;
 }
