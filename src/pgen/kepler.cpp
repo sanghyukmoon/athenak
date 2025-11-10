@@ -59,7 +59,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     bool in_x2 = (py >= x2min && py < x2max);
     bool in_x3 = (pz >= x3min && pz < x3max);
 
-    // Respect dimensionality of the mesh: if mesh is effectively 1D/2D, accept by ignoring
+    // If mesh is effectively 1D/2D, accept by ignoring
     // the unused directions (multi_d and three_d flags live on Mesh).
     bool multi_d = pmbp->pmesh->multi_d;
     bool three_d = pmbp->pmesh->three_d;
