@@ -1,0 +1,68 @@
+# AthenaK input file for isothermal Bondi accretion
+
+<comment>
+problem   = isothermal bondi accretion with sink particle
+
+<job>
+basename  = bondi       # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 2         # Number of ghost cells
+nx1       = 64       # Number of zones in X1-direction
+x1min     = -2.0      # minimum value of X1
+x1max     = 2.0       # maximum value of X1
+ix1_bc    = periodic  # Inner-X1 boundary condition flag
+ox1_bc    = periodic  # Outer-X1 boundary condition flag
+
+nx2       = 64       # Number of zones in X2-direction
+x2min     = -2.0      # minimum value of X2
+x2max     = 2.0       # maximum value of X2
+ix2_bc    = periodic  # Inner-X2 boundary condition flag
+ox2_bc    = periodic  # Outer-X2 boundary condition flag
+
+nx3       = 64       # Number of zones in X3-direction
+x3min     = -2.0      # minimum value of X3
+x3max     = 2.0       # maximum value of X3
+ix3_bc    = periodic  # Inner-X3 boundary condition flag
+ox3_bc    = periodic  # Outer-X3 boundary condition flag
+
+<meshblock>
+nx1       = 64       # Number of cells in each MeshBlock, X1-dir
+nx2       = 64       # Number of cells in each MeshBlock, X2-dir
+nx3       = 64       # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic   # dynamic/kinematic/static
+integrator = rk2       # time integration algorithm
+cfl_number = 0.3       # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = 0        # cycle limit
+tlim       = 1.0      # time limit
+ndiag      = 1         # cycles between diagostic output
+
+<hydro>
+eos         = isothermal  # EOS type
+reconstruct = plm    # spatial reconstruction method
+rsolver     = hlle   # Riemann-solver to be used
+iso_sound_speed = 1.0  # isothermal sound speed
+
+<hydro_srcterm>
+point_mass = true
+point_mass_gm = 1.0
+
+# <particles>
+# type = sink
+# ppc    = 3.82e-6 # particle per cell = 1.0 / (# of cells per pack) -> one particle
+# pusher = leapfrog
+# point_mass_gm = 1.0
+
+<problem>
+
+<output1>
+file_type   = bin      # Particle VTK data dump
+variable    = hydro_w
+dt          = 0.01      # time increment between outputs
+
+# <output2>
+# file_type   = pvtk      # Particle VTK data dump
+# variable    = prtcl_all
+# dt          = 0.01      # time increment between outputs
