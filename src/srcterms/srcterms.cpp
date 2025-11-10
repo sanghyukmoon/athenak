@@ -178,7 +178,7 @@ void SourceTerms::PointMass(const DvceArray5D<Real> &w0, const EOS_Data &eos_dat
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     Real r3 = pow(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0), 1.5);
-    Real src = -bdt*gm_/r3*w0(m,IDN,k,j,i);
+    Real src = (r3==0.0) ? 0.0 : -bdt*gm_/r3*w0(m,IDN,k,j,i);
     u0(m,IM1,k,j,i) += src*(x1v-x0);
     u0(m,IM2,k,j,i) += src*(x2v-y0);
     u0(m,IM3,k,j,i) += src*(x3v-z0);
