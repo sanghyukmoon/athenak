@@ -56,6 +56,9 @@ SourceTerms::SourceTerms(std::string block, MeshBlockPack *pp, ParameterInput *p
   // (2) read data for point-mass gravity
   if (point_mass) {
     point_mass_gm = pin->GetReal(block, "point_mass_gm");
+    pos1 = pin->GetReal(block, "pos_1");
+    pos2 = pin->GetReal(block, "pos_2");
+    pos3 = pin->GetReal(block, "pos_3");
   }
 
   // (3) Optically thin ISM cooling
@@ -156,6 +159,9 @@ void SourceTerms::PointMass(const DvceArray5D<Real> &w0, const EOS_Data &eos_dat
   auto &size = pmy_pack->pmb->mb_size;
 
   Real &gm_ = point_mass_gm;
+  Real &x0 = pos1;
+  Real &y0 = pos2;
+  Real &z0 = pos3;
 
   par_for("point_mass", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -171,11 +177,11 @@ void SourceTerms::PointMass(const DvceArray5D<Real> &w0, const EOS_Data &eos_dat
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-    Real r3 = pow(SQR(x1v) + SQR(x2v) + SQR(x3v), 1.5);
+    Real r3 = pow(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0), 1.5);
     Real src = -bdt*gm_/r3*w0(m,IDN,k,j,i);
-    u0(m,IM1,k,j,i) += src*x1v;
-    u0(m,IM2,k,j,i) += src*x2v;
-    u0(m,IM3,k,j,i) += src*x3v;
+    u0(m,IM1,k,j,i) += src*(x1v-x0);
+    u0(m,IM2,k,j,i) += src*(x2v-y0);
+    u0(m,IM3,k,j,i) += src*(x3v-z0);
   });
 
   return;

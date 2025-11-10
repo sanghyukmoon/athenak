@@ -48,6 +48,9 @@ iso_sound_speed = 1.0  # isothermal sound speed
 <hydro_srcterm>
 point_mass = true
 point_mass_gm = 1.0
+pos_1 = 0.03125
+pos_2 = 0.03125
+pos_3 = 0.03125
 
 # <particles>
 # type = sink
