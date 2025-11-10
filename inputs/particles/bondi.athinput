@@ -11,20 +11,20 @@ nghost    = 2         # Number of ghost cells
 nx1       = 64       # Number of zones in X1-direction
 x1min     = -2.0      # minimum value of X1
 x1max     = 2.0       # maximum value of X1
-ix1_bc    = periodic  # Inner-X1 boundary condition flag
-ox1_bc    = periodic  # Outer-X1 boundary condition flag
+ix1_bc    = user  # Inner-X1 boundary condition flag
+ox1_bc    = user  # Outer-X1 boundary condition flag
 
 nx2       = 64       # Number of zones in X2-direction
 x2min     = -2.0      # minimum value of X2
 x2max     = 2.0       # maximum value of X2
-ix2_bc    = periodic  # Inner-X2 boundary condition flag
-ox2_bc    = periodic  # Outer-X2 boundary condition flag
+ix2_bc    = user  # Inner-X2 boundary condition flag
+ox2_bc    = user  # Outer-X2 boundary condition flag
 
 nx3       = 64       # Number of zones in X3-direction
 x3min     = -2.0      # minimum value of X3
 x3max     = 2.0       # maximum value of X3
-ix3_bc    = periodic  # Inner-X3 boundary condition flag
-ox3_bc    = periodic  # Outer-X3 boundary condition flag
+ix3_bc    = user  # Inner-X3 boundary condition flag
+ox3_bc    = user  # Outer-X3 boundary condition flag
 
 <meshblock>
 nx1       = 64       # Number of cells in each MeshBlock, X1-dir
