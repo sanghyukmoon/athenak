@@ -3,8 +3,8 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file cloud_collapse.cpp
-//! \brief Problem generator for gravitational collapse of turbulent cloud
+//! \file gmtf.cpp
+//! \brief Problem generator for gravo-magneto-turbulent fragmentation
 
 // C headers
 
@@ -35,40 +35,43 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) return;
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
+  DvceArray5D<Real> u0;
 
   if (pmbp->phydro != nullptr) {
     // HYDRO -----------------------------------
     if (pmbp->phydro->peos->eos_data.is_ideal) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "cloud_collapse requires isothermal eos" << std::endl;
+                << "this problem requires isothermal eos" << std::endl;
       std::exit(EXIT_FAILURE);
     }
     if (pmbp->phydro->peos->eos_data.iso_cs != 1.0) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "cloud_collapse takes sound speed as unit velocity."
+                << "this problem takes sound speed as unit velocity."
                 << " set iso_sound_speed = 1.0 in the input file" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    u0 = pmbp->phydro->u0;
   } else if (pmbp->pmhd != nullptr) {
     // MHD ------------------------------------
     if (!pmbp->pmhd->peos->eos_data.is_ideal) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "cloud_collapse requires isothermal eos" << std::endl;
+                << "this problem requires isothermal eos" << std::endl;
       std::exit(EXIT_FAILURE);
     }
     if (pmbp->pmhd->peos->eos_data.iso_cs != 1.0) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "cloud_collapse takes sound speed as unit velocity."
+                << "this problem takes sound speed as unit velocity."
                 << " set iso_sound_speed = 1.0 in the input file" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    u0 = pmbp->pmhd->u0;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "cloud_collapse can only be run with Hydro and/or MHD, but no "
+              << "this problem can only be run with Hydro and/or MHD, but no "
               << "<hydro> or <mhd> block in input file" << std::endl;
     std::exit(EXIT_FAILURE);
   }
@@ -80,12 +83,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
 
-  DvceArray5D<Real> u0;
 
   // Initialize Hydro variables -------------------------------
   if (pmbp->phydro != nullptr) {
-    u0 = pmbp->phydro->u0;
-
     // Set initial conditions
     par_for("pgen_turb", DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -99,7 +99,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Initialize MHD variables ---------------------------------
   if (pmbp->pmhd != nullptr) {
-    u0 = pmbp->pmhd->u0;
     auto &b0 = pmbp->pmhd->b0;
     Real mu_phi = pin->GetReal("problem", "mu_phi");
     Real lbox = pmy_mesh_->mesh_size.x1max - pmy_mesh_->mesh_size.x1min;
@@ -131,13 +130,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (mach <= 0.0) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
-              << "cloud_collapse requires problem/Mach > 0" << std::endl;
+              << "Mach number must be positive" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (nhigh <= nlow) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
-              << "cloud_collapse requires problem/nhigh > problem/nlow" << std::endl;
+              << "problem/nhigh must be greater than problem/nlow" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   // TODO(SMOON) Check if cs=1.0
@@ -149,7 +148,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (!(x1size == x2size && x1size == x3size)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
-              << "cloud_collapse requires cubic domain" << std::endl;
+              << "this problem assumes cubic domain" << std::endl;
     std::exit(EXIT_FAILURE);
   }
 
@@ -233,17 +232,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   sync_to_device(vyk_im);
   sync_to_device(vzk_im);
 
-  if (pmbp->phydro != nullptr) {
-    u0 = pmbp->phydro->u0;
-  } else if (pmbp->pmhd != nullptr) {
-    u0 = pmbp->pmhd->u0;
-  } else {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl
-              << "cloud_collapse requires either Hydro or MHD" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-
   int nmb = pmbp->nmb_thispack;
   int nx1 = indcs.nx1;
   int nx2 = indcs.nx2;
@@ -252,7 +240,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &size = pmbp->pmb->mb_size;
   DvceArray5D<Real> dv("vel_perturb", nmb, 3, nx3 + 2*ng, nx2 + 2*ng, nx1 + 2*ng);
 
-  par_for("cloud_collapse_build_turb", DevExeSpace(), 0, nmb - 1, ks, ke, js, je, is, ie,
+  par_for("gmtf_build_turb", DevExeSpace(), 0, nmb - 1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real x1v = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
     Real x2v = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
@@ -277,7 +265,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   const int nkji = nx3*nx2*nx1;
   const int nji = nx2*nx1;
   Real v2_sum = 0.0;
-  Kokkos::parallel_reduce("cloud_collapse_vrms",
+  Kokkos::parallel_reduce("gmtf_vrms",
   Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &v2_sum_local) {
     int m = idx/nkji;
@@ -297,7 +285,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   long long Nx2 = static_cast<long long>(pmbp->pmesh->mesh_indcs.nx2);
   long long Nx3 = static_cast<long long>(pmbp->pmesh->mesh_indcs.nx3);
   Real vrms = std::sqrt(v2_sum / static_cast<Real>(Nx1*Nx2*Nx3));
-  par_for("cloud_collapse_init_turb", DevExeSpace(), 0, nmb - 1, ks, ke, js, je, is, ie,
+  par_for("gmtf_init_turb", DevExeSpace(), 0, nmb - 1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     u0(m,IM1,k,j,i) += mach/vrms*dv(m,0,k,j,i);
     u0(m,IM2,k,j,i) += mach/vrms*dv(m,1,k,j,i);
