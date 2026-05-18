@@ -55,7 +55,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     u0 = pmbp->phydro->u0;
   } else if (pmbp->pmhd != nullptr) {
     // MHD ------------------------------------
-    if (!pmbp->pmhd->peos->eos_data.is_ideal) {
+    if (pmbp->pmhd->peos->eos_data.is_ideal) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
                 << "this problem requires isothermal eos" << std::endl;
