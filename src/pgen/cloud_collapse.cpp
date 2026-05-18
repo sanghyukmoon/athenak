@@ -36,32 +36,40 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
-  if (pmbp->phydro == nullptr && pmbp->pmhd == nullptr) {
+  if (pmbp->phydro != nullptr) {
+    // HYDRO -----------------------------------
+    if (pmbp->phydro->peos->eos_data.is_ideal) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "cloud_collapse requires isothermal eos" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pmbp->phydro->peos->eos_data.iso_cs != 1.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "cloud_collapse takes sound speed as unit velocity."
+                << " set iso_sound_speed = 1.0 in the input file" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else if (pmbp->pmhd != nullptr) {
+    // MHD ------------------------------------
+    if (!pmbp->pmhd->peos->eos_data.is_ideal) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "cloud_collapse requires isothermal eos" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pmbp->pmhd->peos->eos_data.iso_cs != 1.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "cloud_collapse takes sound speed as unit velocity."
+                << " set iso_sound_speed = 1.0 in the input file" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "cloud_collapse can only be run with Hydro and/or MHD, but no "
               << "<hydro> or <mhd> block in input file" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-
-  if (pmbp->pcoord->is_special_relativistic ||
-      pmbp->pcoord->is_general_relativistic) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl
-              << "cloud_collapse requires non-relativistic Hydro/MHD" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-
-  if (pmbp->phydro != nullptr && pmbp->phydro->peos->eos_data.is_ideal) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl
-              << "cloud_collapse requires isothermal Hydro" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-
-  if (pmbp->pmhd != nullptr && pmbp->pmhd->peos->eos_data.is_ideal) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl
-              << "cloud_collapse requires isothermal MHD" << std::endl;
     std::exit(EXIT_FAILURE);
   }
 
