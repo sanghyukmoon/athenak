@@ -27,15 +27,15 @@ ix3_bc    = periodic  # Inner-X3 boundary condition flag
 ox3_bc    = periodic  # Outer-X3 boundary condition flag
 
 <meshblock>
-nx1       = 64       # Number of cells in each MeshBlock, X1-dir
-nx2       = 64       # Number of cells in each MeshBlock, X2-dir
-nx3       = 64       # Number of cells in each MeshBlock, X3-dir
+nx1       = 32       # Number of cells in each MeshBlock, X1-dir
+nx2       = 32       # Number of cells in each MeshBlock, X2-dir
+nx3       = 32       # Number of cells in each MeshBlock, X3-dir
 
 <time>
 evolution  = dynamic   # dynamic/kinematic/static
 integrator = rk2       # time integration algorithm
 cfl_number = 0.3       # The Courant, Friedrichs, & Lewy (CFL) Number
-nlim       = 0         # cycle limit
+nlim       = -1         # cycle limit
 tlim       = 1.0       # time limit
 ndiag      = 1         # cycles between diagostic output
 
@@ -63,6 +63,6 @@ file_type   = bin      # Particle VTK data dump
 variable    = mhd_u
 dt          = 0.001    # time increment between outputs
 
-<output2>
+<output3>
 file_type   = rst      # Particle VTK data dump
 dt          = 999      # time increment between outputs
