@@ -39,11 +39,18 @@ nlim       = -1         # cycle limit
 tlim       = 1.0       # time limit
 ndiag      = 1         # cycles between diagostic output
 
-<mhd>
+<hydro>
 eos         = isothermal  # EOS type
 reconstruct = plm    # spatial reconstruction method
 rsolver     = hlle   # Riemann-solver to be used
 iso_sound_speed = 1.0  # isothermal sound speed
+
+#<mhd>
+#eos         = isothermal  # EOS type
+#reconstruct = plm    # spatial reconstruction method
+#rsolver     = hlld   # Riemann-solver to be used
+#iso_sound_speed = 1.0  # isothermal sound speed
+
 
 <problem>
 Mach       = 10       # 3D Mach number of initial turbulence
@@ -60,8 +67,9 @@ dt          = 0.0001   # time increment between outputs
 
 <output2>
 file_type   = bin      # Particle VTK data dump
-variable    = mhd_u
-dt          = 0.001    # time increment between outputs
+variable    = hydro_u
+#variable    = mhd_u_bcc
+dt          = 0.003    # time increment between outputs
 
 <output3>
 file_type   = rst      # Particle VTK data dump
