@@ -45,15 +45,15 @@ void WriteProfile(const std::string &label, const RadialProfile &profile,
   const auto host_centers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), centers);
   std::ofstream out("profile_"+label+".txt");
   out << std::setprecision(17);
-  out << "# dr nr requested_rmax final_edge ncenter\n"
-      << profile.dr << ' ' << profile.nr << ' ' << requested_rmax << ' '
-      << (profile.nr-0.5)*profile.dr << ' ' << centers.extent(0) << '\n';
+  out << "# bin_width num_bins requested_rmax final_edge ncenter\n"
+      << profile.bin_width << ' ' << profile.num_bins << ' ' << requested_rmax << ' '
+      << (profile.num_bins-0.5)*profile.bin_width << ' ' << centers.extent(0) << '\n';
   for (std::size_t c=0; c<centers.extent(0); ++c) {
     const auto &center = host_centers(c);
     out << "# center " << center.id << ' ' << center.x1 << ' ' << center.x2
         << ' ' << center.x3 << '\n';
-    for (int bin=0; bin<profile.nr; ++bin) {
-      out << bin*profile.dr << ' ' << host(c, RadialProfile::density, bin) << ' '
+    for (int bin=0; bin<profile.num_bins; ++bin) {
+      out << bin*profile.bin_width << ' ' << host(c, RadialProfile::density, bin) << ' '
           << host(c, RadialProfile::sampled_volume, bin) << '\n';
     }
   }
@@ -62,13 +62,13 @@ void WriteProfile(const std::string &label, const RadialProfile &profile,
 
 void PoisonGhostDensity(Mesh *pm) {
   auto *pack = pm->pmb_pack;
-  auto w = pack->phydro != nullptr ? pack->phydro->w0 : pack->pmhd->w0;
+  auto u0 = pack->phydro != nullptr ? pack->phydro->u0 : pack->pmhd->u0;
   const auto b = pm->mb_indcs;
   par_for("poison_rprof_ghosts", DevExeSpace(), 0, pack->nmb_thispack-1,
-      0, static_cast<int>(w.extent(2))-1, 0, static_cast<int>(w.extent(3))-1,
-      0, static_cast<int>(w.extent(4))-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      0, static_cast<int>(u0.extent(2))-1, 0, static_cast<int>(u0.extent(3))-1,
+      0, static_cast<int>(u0.extent(4))-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
     if (i<b.is || i>b.ie || j<b.js || j>b.je || k<b.ks || k>b.ke) {
-      w(m, IDN, k, j, i) = 1.0e20;
+      u0(m, IDN, k, j, i) = 1.0e20;
     }
   });
   Kokkos::fence();

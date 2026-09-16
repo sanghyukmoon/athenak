@@ -29,28 +29,11 @@ namespace {
 #endif
   std::exit(EXIT_FAILURE);
 }
-
-DvceArray5D<Real> Primitives(Mesh *mesh) {
-  auto *pack = mesh->pmb_pack;
-  DvceArray5D<Real> primitive;
-  if (pack->phydro != nullptr) {
-    primitive = pack->phydro->w0;
-  } else if (pack->pmhd != nullptr) {
-    primitive = pack->pmhd->w0;
-  }
-  const auto &indcs = mesh->mb_indcs;
-  if (primitive.extent(0) < static_cast<std::size_t>(pack->nmb_thispack) ||
-      primitive.extent(1) <= IDN || primitive.extent(2) <= indcs.ke ||
-      primitive.extent(3) <= indcs.je || primitive.extent(4) <= indcs.ie) {
-    Fail("an available hydro or MHD primitive density array is required");
-  }
-  return primitive;
-}
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
-    : dr(mesh->mesh_size.dx1),
-      nr(static_cast<int>(std::floor((requested_rmax - 0.5*dr) / dr)) + 1),
+    : bin_width(mesh->mesh_size.dx1),
+      num_bins(static_cast<int>(std::floor((requested_rmax - 0.5*bin_width) / bin_width)) + 1),
       mesh_(mesh) {
 }
 
@@ -71,7 +54,7 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
 
   if (measure_time) { Kokkos::fence(); clock.reset(); }
   const std::uint64_t ncenter = centers.extent(0);
-  result = DvceArray3D<Real>("radial_profile", ncenter, nfields, nr);
+  result = DvceArray3D<Real>("radial_profile", ncenter, nfields, num_bins);
   const auto scatter = Kokkos::Experimental::create_scatter_view(result);
   phase(timings.allocation);
   if (ncenter == 0) {
@@ -81,39 +64,45 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   }
   phase(timings.reset);
 
-  const auto primitive = Primitives(mesh_);
-  const auto mbsize = mesh_->pmb_pack->pmb->mb_size.d_view;
+  // Capture variables
+  DvceArray5D<Real> u0;
+  auto *pack = mesh_->pmb_pack;
+  if (pack->phydro != nullptr) {
+    u0 = pack->phydro->u0;
+  } else if (pack->pmhd != nullptr) {
+    u0 = pack->pmhd->u0;
+  }
+  const auto &mesh_size = mesh_->mesh_size;
+  const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
+  const Real lx1 = mesh_size.x1max - mesh_size.x1min;
+  const Real lx2 = mesh_size.x2max - mesh_size.x2min;
+  const Real lx3 = mesh_size.x3max - mesh_size.x3min;
+  const auto meshblock_sizes = mesh_->pmb_pack->pmb->mb_size.d_view;
   const auto indcs = mesh_->mb_indcs;
-  const auto &ms = mesh_->mesh_size;
-  const Real dvol = ms.dx1*ms.dx2*ms.dx3;
-  const Real lx1 = ms.x1max - ms.x1min;
-  const Real lx2 = ms.x2max - ms.x2min;
-  const Real lx3 = ms.x3max - ms.x3min;
-  const std::uint64_t nmb = mesh_->pmb_pack->nmb_thispack;
   const std::uint64_t ncells = std::uint64_t(indcs.nx1)*indcs.nx2*indcs.nx3;
+  const std::uint64_t nmb = mesh_->pmb_pack->nmb_thispack;
   if (ncenter*nmb*ncells > std::numeric_limits<std::int64_t>::max()) {
     Fail("cell loop overflow");
   }
-  const Real dx = dr;
-  const int bins = nr;
+  const Real dr = bin_width;
+  const int nbins = num_bins;
   par_for<std::int64_t>("radial_profile_accumulate", DevExeSpace(),
       0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
       0, indcs.nx3-1, 0, indcs.nx2-1, 0, indcs.nx1-1,
       KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
-    const auto &block = mbsize(m);
+    const auto &block_size = meshblock_sizes(m);
     const auto &center = centers(c);
-    Real x = CellCenterX(i, indcs.nx1, block.x1min, block.x1max)-center.x1;
-    Real y = CellCenterX(j, indcs.nx2, block.x2min, block.x2max)-center.x2;
-    Real z = CellCenterX(k, indcs.nx3, block.x3min, block.x3max)-center.x3;
+    Real x = CellCenterX(i, indcs.nx1, block_size.x1min, block_size.x1max) - center.x1;
+    Real y = CellCenterX(j, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
+    Real z = CellCenterX(k, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
-    const Real radial_index = floor(sqrt(x*x+y*y+z*z)/dx + Real(0.5));
-    if (radial_index < bins) {
+    const Real radial_index = floor(sqrt(x*x+y*y+z*z)/dr + Real(0.5));
+    if (radial_index < nbins) {
       const int bin = static_cast<int>(radial_index);
       auto sum = scatter.access();
-      sum(c, density, bin) += primitive(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)
-                              * dvol;
+      sum(c, density, bin) += u0(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
       sum(c, sampled_volume, bin) += dvol;
     }
   });
@@ -121,7 +110,7 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   Kokkos::fence();  // complete device writes before MPI reads this memory
   phase(timings.accumulation);
 #if MPI_PARALLEL_ENABLED
-  const int count = static_cast<int>(ncenter*nfields*nr);
+  const int count = static_cast<int>(ncenter*nfields*num_bins);
   const int status = MPI_Reduce(global_variable::my_rank == 0 ? MPI_IN_PLACE : result.data(),
       result.data(), count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD);
   if (status != MPI_SUCCESS) Fail("device-buffer MPI_Reduce failed");
@@ -131,7 +120,7 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
     const auto profile = result;
     const Real empty = std::numeric_limits<Real>::quiet_NaN();
     par_for("radial_profile_normalize", DevExeSpace(),
-        0, static_cast<int>(ncenter)-1, 0, bins-1,
+        0, static_cast<int>(ncenter)-1, 0, nbins-1,
         KOKKOS_LAMBDA(int c, int bin) {
       const Real volume = profile(c, sampled_volume, bin);
       profile(c, density, bin) = volume > 0 ? profile(c, density, bin)/volume : empty;
