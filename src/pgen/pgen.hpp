@@ -14,6 +14,7 @@
 
 #include "geodesic-grid/spherical_grid.hpp"
 #include "parameter_input.hpp"
+#include "utils/radial_profile.hpp"
 
 using ProblemFinalizeFnPtr = void (*)(ParameterInput *pin, Mesh *pm);
 using UserBoundaryFnPtr = void (*)(Mesh* pm);
@@ -48,6 +49,7 @@ class ProblemGenerator {
   // function pointer for final work after main loop (e.g. compute errors).  Called by
   // Driver::Finalize()
   ProblemFinalizeFnPtr pgen_final_func=nullptr;
+  RadialProfileCenterFnPtr rprof_center_func = nullptr;
   // function pointer for user-enrolled BCs.  Called in ApplyPhysicalBCs in task list
   UserBoundaryFnPtr user_bcs_func=nullptr;
   UserSrctermFnPtr user_srcs_func=nullptr;
