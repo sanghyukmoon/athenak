@@ -39,8 +39,6 @@ class RadialProfile {
   } timings;
 
  private:
-  using Scatter = Kokkos::Experimental::ScatterView<Real***, LayoutWrapper>;
   Mesh *mesh_;
-  Scatter scatter_;
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_

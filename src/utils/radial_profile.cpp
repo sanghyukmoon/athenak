@@ -71,18 +71,14 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
 
   if (measure_time) { Kokkos::fence(); clock.reset(); }
   const std::uint64_t ncenter = centers.extent(0);
-  if (result.extent(0) != ncenter) {
-    result = DvceArray3D<Real>("radial_profile", ncenter, nfields, nr);
-    scatter_ = Scatter(result);
-  }
+  result = DvceArray3D<Real>("radial_profile", ncenter, nfields, nr);
+  const auto scatter = Kokkos::Experimental::create_scatter_view(result);
   phase(timings.allocation);
   if (ncenter == 0) {
     Kokkos::fence();
     if (measure_time) timings.total = clock.seconds();
     return;
   }
-  scatter_.reset();
-  Kokkos::deep_copy(result, 0.0);  // reset target as well as duplicated CPU storage
   phase(timings.reset);
 
   const auto primitive = Primitives(mesh_);
@@ -94,7 +90,6 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   if (nblock > 0 && ncenter > std::numeric_limits<std::int64_t>::max() /
                               nblock / cells_per_block) Fail("cell loop overflow");
   const auto device_centers = centers;
-  const auto scatter = scatter_;
   const Real dx = dr, cell_volume = s.dx1*s.dx2*s.dx3;
   const Real length1 = s.x1max-s.x1min, length2 = s.x2max-s.x2min;
   const Real length3 = s.x3max-s.x3min;
@@ -120,7 +115,7 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
       sum(c, sampled_volume, bin) += cell_volume;
     }
   });
-  Kokkos::Experimental::contribute(result, scatter_);
+  Kokkos::Experimental::contribute(result, scatter);
   Kokkos::fence();  // complete device writes before MPI reads this memory
   phase(timings.accumulation);
 #if MPI_PARALLEL_ENABLED
