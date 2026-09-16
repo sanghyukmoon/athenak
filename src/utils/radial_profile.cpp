@@ -91,7 +91,7 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   const auto s = mesh_->mesh_size;
   const std::uint64_t nblock = mesh_->pmb_pack->nmb_thispack;
   const std::uint64_t cells_per_block = std::uint64_t(b.nx1)*b.nx2*b.nx3;
-  if (nblock > 0 && ncenter > std::numeric_limits<std::uint64_t>::max() /
+  if (nblock > 0 && ncenter > std::numeric_limits<std::int64_t>::max() /
                               nblock / cells_per_block) Fail("cell loop overflow");
   const auto device_centers = centers;
   const auto scatter = scatter_;
@@ -99,14 +99,10 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   const Real length1 = s.x1max-s.x1min, length2 = s.x2max-s.x2min;
   const Real length3 = s.x3max-s.x3min;
   const int bins = nr;
-  using Policy = Kokkos::RangePolicy<DevExeSpace, Kokkos::IndexType<std::uint64_t>>;
-  Kokkos::parallel_for("radial_profile_accumulate",
-      Policy(0, ncenter*nblock*cells_per_block), KOKKOS_LAMBDA(std::uint64_t index) {
-    const int i = index % b.nx1; index /= b.nx1;
-    const int j = index % b.nx2; index /= b.nx2;
-    const int k = index % b.nx3; index /= b.nx3;
-    const int m = index % nblock;
-    const std::uint64_t c = index / nblock;
+  par_for<std::int64_t>("radial_profile_accumulate", DevExeSpace(),
+      0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nblock)-1,
+      0, b.nx3-1, 0, b.nx2-1, 0, b.nx1-1,
+      KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
     const auto &block = size(m);
     const auto &center = device_centers(c);
     Real x = CellCenterX(i, b.nx1, block.x1min, block.x1max)-center.x1;
@@ -137,10 +133,9 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   if (global_variable::my_rank == 0) {
     const auto profile = result;
     const Real empty = std::numeric_limits<Real>::quiet_NaN();
-    Kokkos::parallel_for("radial_profile_normalize", Policy(0, ncenter*nr),
-        KOKKOS_LAMBDA(std::uint64_t index) {
-      const auto c = index/bins;
-      const int bin = index%bins;
+    par_for("radial_profile_normalize", DevExeSpace(),
+        0, static_cast<int>(ncenter)-1, 0, bins-1,
+        KOKKOS_LAMBDA(int c, int bin) {
       const Real volume = profile(c, sampled_volume, bin);
       profile(c, density, bin) = volume > 0 ? profile(c, density, bin)/volume : empty;
     });

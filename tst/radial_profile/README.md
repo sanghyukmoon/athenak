@@ -87,3 +87,10 @@ memory (device-wide, not a per-calculator allocation or peak device metric).
 Run `summarize.py CAMPAIGN` for phase CSV and PDF plots after the campaign.
 Persistent radial output, reader integration, subcells, fields beyond density,
 and minima discovery are deferred.
+
+The 5D `par_for` defaults to signed `int` indexing with an explicit Kokkos
+`IndexType` policy. Use `par_for<std::int64_t>` when the combined iteration count
+needs 64 bits; each individual dimension and callback coordinate must still fit int. Accumulation
+uses this wide wrapper over `(center, MeshBlock, k, j, i)`; normalization uses
+2D `par_for` under the MPI buffer-count precondition. Cell coordinates stay
+zero-based until primitive-array access adds the active-cell offsets.

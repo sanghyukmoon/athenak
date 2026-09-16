@@ -167,7 +167,7 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
 
   // Exercise future GPU-provider data flow with prescribed centers, not minima.
   const DvceArray1D<RadialProfileCenter> device_three("device_three_centers", 3);
-  Kokkos::parallel_for("generate_rprof_centers", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+  par_for("generate_rprof_centers", DevExeSpace(), 0, 0,
       KOKKOS_LAMBDA(int) {
     device_three(0) = midpoint;
     device_three(1) = boundary;
@@ -176,7 +176,7 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   Kokkos::fence();  // provider contract: centers ready before Compute
   profile.Compute(device_three);
   WriteProfile("device_three", profile, device_three, requested);
-  Kokkos::parallel_for("reorder_rprof_centers", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+  par_for("reorder_rprof_centers", DevExeSpace(), 0, 0,
       KOKKOS_LAMBDA(int) {
     const auto first = device_three(0);
     device_three(0) = device_three(1);
