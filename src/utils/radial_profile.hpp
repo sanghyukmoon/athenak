@@ -25,9 +25,8 @@ class RadialProfile {
   RadialProfile(Mesh *mesh, Real rmax);
   void Compute(const std::vector<RadialProfileCenter>& centers);
 
-  const Real dr, rmax;  // requested maximum OUTER edge, not last radial coordinate
+  const Real dr;
   const int nr;
-  const Real final_edge;
   DvceArray3D<Real> result;  // (center, field, radial_bin); empty for no centers
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.

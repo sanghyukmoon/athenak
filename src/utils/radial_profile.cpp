@@ -30,24 +30,6 @@ namespace {
   std::exit(EXIT_FAILURE);
 }
 
-int BinCount(Mesh *mesh, Real dx, Real rmax) {
-  const auto &ms = mesh->mesh_size;
-  const Real half_box = 0.5 * std::min(
-      {ms.x1max - ms.x1min, ms.x2max - ms.x2min, ms.x3max - ms.x3min}
-  );
-  const Real tolerance = 16 * std::numeric_limits<Real>::epsilon();
-  if (rmax < 0.5*dx || rmax > half_box) {
-    Fail("rmax must satisfy dx/2 <= rmax <= Lmin/2");
-  }
-  Real last = rmax/dx - Real(0.5);
-  const Real aligned = std::round(last);
-  if (std::abs(last-aligned) <= tolerance*std::max(Real(1.0), std::abs(last))) {
-    last = aligned;
-  }
-  if (last >= std::numeric_limits<int>::max()-1) Fail("too many radial bins");
-  return static_cast<int>(std::floor(last)) + 1;
-}
-
 DvceArray5D<Real> Primitives(Mesh *mesh) {
   auto *pack = mesh->pmb_pack;
   DvceArray5D<Real> primitive;
@@ -67,24 +49,17 @@ DvceArray5D<Real> Primitives(Mesh *mesh) {
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
-    : dr(mesh->mesh_size.dx1), rmax(requested_rmax), nr(BinCount(mesh, dr, rmax)),
-      final_edge((nr-0.5)*dr), mesh_(mesh) {
-#if MPI_PARALLEL_ENABLED && defined(KOKKOS_ENABLE_CUDA)
-#if defined(OMPI_HAVE_MPI_EXT_CUDA) && OMPI_HAVE_MPI_EXT_CUDA
-  if (MPIX_Query_cuda_support() != 1) {
-    Fail("CUDA-aware MPI is required for device-buffer MPI_Reduce");
-  }
-#else
-  Fail("cannot verify CUDA-aware MPI (MPIX_Query_cuda_support unavailable); "
-       "device reduction requires a verifiable CUDA-aware MPI build");
-#endif
-#endif
+    : dr(mesh->mesh_size.dx1),
+      nr(static_cast<int>(std::floor((rmax - 0.5*dx) / dx)) + 1),
+      mesh_(mesh) {
 }
 
 void RadialProfile::Compute(const std::vector<RadialProfileCenter>& centers) {
   timings = {};
   Kokkos::Timer clock;
   double start = 0;
+
+  // Local timer lambda
   auto phase = [&](double &seconds) {
     if (measure_time) {
       Kokkos::fence();
@@ -93,16 +68,9 @@ void RadialProfile::Compute(const std::vector<RadialProfileCenter>& centers) {
       start = now;
     }
   };
+
   if (measure_time) { Kokkos::fence(); clock.reset(); }
   const std::uint64_t ncenter = centers.size();
-  if (ncenter > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) /
-                (static_cast<std::uint64_t>(nfields)*nr)) {
-    Fail("complete radial array exceeds MPI count limit");
-  }
-  for (const auto &center : centers) {
-    if (!std::isfinite(center.x1) || !std::isfinite(center.x2) ||
-        !std::isfinite(center.x3)) Fail("center coordinates must be finite");
-  }
   if (result.extent(0) != ncenter) {
     result = DvceArray3D<Real>("radial_profile", ncenter, nfields, nr);
     scatter_ = Scatter(result);
