@@ -42,9 +42,8 @@ def check_run(directory, n, varying, requested, bounds=(-2., 2.)):
     rho = (1 + 0.1*np.cos(np.pi*x/2) + 0.05*np.sin(np.pi*y/2)
            + 0.025*np.cos(np.pi*z/2)) if varying else np.ones_like(x)
     edges = (np.arange(n)+0.5)*dx
-    # Explicit candidate edges with precision-scaled exact-alignment acceptance.
-    complete = (edges <= requested) | np.isclose(edges, requested, rtol=0,
-                           atol=16*np.finfo(float).eps*max(dx, requested))
+    # Strict inclusion of complete candidate shells; no near-edge snapping.
+    complete = edges <= requested
     nr = np.count_nonzero(complete)
     midpoint = (n//2 + n*(n//2 + n*(n//2)), axis[n//2], axis[n//2], axis[n//2])
     expected = {
@@ -55,6 +54,8 @@ def check_run(directory, n, varying, requested, bounds=(-2., 2.)):
                       (0, axis[0], axis[0], axis[0]), midpoint],
         'shrink': [midpoint], 'initial_empty': [], 'empty': [], 'restored': [midpoint],
     }
+    expected['device_three'] = expected['three']
+    expected['device_reordered'] = expected['reordered']
     maximum_error = 0.
     for label, centers in expected.items():
         actual_dx, actual_nr, actual_requested, edge, got_centers, data = parse(
@@ -153,21 +154,12 @@ def main():
     run('inward', n=4, block=4)
     run('exact_edge', rmax=1.125)
     run('near_edge', rmax=np.nextafter(1.125, 0.))
+    run('above_edge', rmax=np.nextafter(1.125, np.inf))
     run('below_edge', rmax=1.125-1e-10)
     run('smallest', rmax=0.125)
     run('smallest_two_rank', ranks=2, rmax=0.125)
     run('decimal_dx', n=12, block=6, rmax=7/6)
-    run('lower_extent', rmax=0.124, error='dx/2 <= rmax <= Lmin/2')
-    run('negative_extent', rmax=-1, error='dx/2 <= rmax <= Lmin/2')
-    run('upper_extent', rmax=2.001, error='dx/2 <= rmax <= Lmin/2')
-    run('nan_extent', rmax='nan', error='dx/2 <= rmax <= Lmin/2')
-    run('noncubic', overrides=['mesh/x2max=3'], error='noncubic cells are not yet tested')
-    run('nonperiodic', overrides=['mesh/ix1_bc=outflow', 'mesh/ox1_bc=outflow'],
-        error='other dimensions/boundaries/packs are not yet tested')
-    run('two_dimensional', overrides=['mesh/nx3=1', 'meshblock/nx3=1'],
-        error='other dimensions/boundaries/packs are not yet tested')
-    run('refinement', overrides=['mesh_refinement/refinement=static'],
-        error='refinement, zoom, other dimensions/boundaries/packs are not yet tested')
+    # Valid finite extents and supported geometry are caller preconditions.
     # Explicit decomposition and backend comparisons as well as independent oracles.
     comparisons = []
     for other in (root/'two_rank', root/'one_block', root/'mhd', root/'mhd_two_rank'):

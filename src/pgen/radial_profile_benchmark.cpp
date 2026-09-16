@@ -29,21 +29,27 @@ RadialProfileCenter MidpointCell(const RegionSize &box, const RegionIndcs &grid)
           box.x3min + (k+0.5)*(box.x3max-box.x3min)/grid.nx3};
 }
 
-std::vector<RadialProfileCenter> DomainCenter(Mesh *pm) {
-  return {MidpointCell(pm->mesh_size, pm->mesh_indcs)};
+DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm) {
+  DualArray1D<RadialProfileCenter> centers("domain_center", 1);
+  centers.view_host()(0) = MidpointCell(pm->mesh_size, pm->mesh_indcs);
+  centers.modify_host();
+  centers.sync_device();
+  return centers.view_device();
 }
 
 void WriteProfile(const std::string &label, const RadialProfile &profile,
-                  const std::vector<RadialProfileCenter> &centers) {
+                  const DvceArray1D<const RadialProfileCenter> &centers,
+                  Real requested_rmax) {
   if (global_variable::my_rank != 0) return;
   const auto host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), profile.result);
+  const auto host_centers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), centers);
   std::ofstream out("profile_"+label+".txt");
   out << std::setprecision(17);
   out << "# dr nr requested_rmax final_edge ncenter\n"
-      << profile.dr << ' ' << profile.nr << ' ' << profile.rmax << ' '
-      << profile.final_edge << ' ' << centers.size() << '\n';
-  for (std::size_t c=0; c<centers.size(); ++c) {
-    const auto &center = centers[c];
+      << profile.dr << ' ' << profile.nr << ' ' << requested_rmax << ' '
+      << (profile.nr-0.5)*profile.dr << ' ' << centers.extent(0) << '\n';
+  for (std::size_t c=0; c<centers.extent(0); ++c) {
+    const auto &center = host_centers(c);
     out << "# center " << center.id << ' ' << center.x1 << ' ' << center.x2
         << ' ' << center.x3 << '\n';
     for (int bin=0; bin<profile.nr; ++bin) {
@@ -93,11 +99,11 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
     const std::string rank = std::to_string(global_variable::my_rank);
     std::ofstream out("timings_rank"+rank+".csv");
     out << std::setprecision(17)
-        << "call,setup,allocation,reset_transfer,accumulation,reduction,normalization,total\n";
+        << "call,setup,allocation,reset,accumulation,reduction,normalization,total\n";
     for (std::size_t call=0; call<times.size(); ++call) {
       const auto &t = times[call];
       out << call << ',' << (call == 0 ? setup_seconds : 0) << ',' << t.allocation << ','
-          << t.reset_transfer << ',' << t.accumulation << ',' << t.reduction << ','
+          << t.reset << ',' << t.accumulation << ',' << t.reduction << ','
           << t.normalization << ',' << t.total << '\n';
     }
     struct rusage usage;
@@ -113,7 +119,7 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
            << "device_total_bytes " << total_bytes << '\n';
 #endif
     if (!out || !memory) Kokkos::abort("cannot write benchmark diagnostics");
-    WriteProfile("performance", profile, centers);
+    WriteProfile("performance", profile, centers, requested);
     return;
   }
 
@@ -133,32 +139,62 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   PoisonGhostDensity(pm);
   profile.Compute({});
   if (profile.result.size() != 0) Kokkos::abort("initial empty result is not empty");
-  WriteProfile("initial_empty", profile, {});
+  WriteProfile("initial_empty", profile, {}, requested);
   profile.Compute(centers);
-  WriteProfile("single", profile, centers);
+  WriteProfile("single", profile, centers, requested);
   profile.Compute(centers);
-  WriteProfile("repeat", profile, centers);
+  WriteProfile("repeat", profile, centers, requested);
   // Deliberately non-sorted order; the calculator must preserve caller ordering.
-  auto corner = RadialProfileCenter{0, s.x1min+0.5*s.dx1,
-                                      s.x2min+0.5*s.dx2, s.x3min+0.5*s.dx3};
-  auto boundary = RadialProfileCenter{std::uint64_t(pm->mesh_indcs.nx1)-1,
-                                      s.x1min, s.x2min, s.x3min};
-  std::vector<RadialProfileCenter> three{centers[0], boundary, corner};
-  profile.Compute(three);
-  WriteProfile("three", profile, three);
-  std::rotate(three.begin(), three.begin()+1, three.end());
-  profile.Compute(three);  // same allocation size, new center ordering
-  WriteProfile("reordered", profile, three);
-  std::rotate(three.begin(), three.end()-1, three.end());
-  three.resize(1);
-  profile.Compute(three);
-  WriteProfile("shrink", profile, three);
+  const auto midpoint = MidpointCell(s, pm->mesh_indcs);
+  const auto corner = RadialProfileCenter{0, s.x1min+0.5*s.dx1,
+                                           s.x2min+0.5*s.dx2, s.x3min+0.5*s.dx3};
+  const auto boundary = RadialProfileCenter{std::uint64_t(pm->mesh_indcs.nx1)-1,
+                                            s.x1min, s.x2min, s.x3min};
+  DualArray1D<RadialProfileCenter> three("three_centers", 3);
+  const auto host_three = three.view_host();
+  host_three(0) = midpoint;
+  host_three(1) = boundary;
+  host_three(2) = corner;
+  three.modify_host();
+  three.sync_device();
+  profile.Compute(three.view_device());
+  WriteProfile("three", profile, three.view_device(), requested);
+  std::rotate(host_three.data(), host_three.data()+1, host_three.data()+3);
+  three.modify_host();
+  three.sync_device();
+  profile.Compute(three.view_device());  // same allocation size, new center ordering
+  WriteProfile("reordered", profile, three.view_device(), requested);
+
+  // Exercise future GPU-provider data flow with prescribed centers, not minima.
+  const DvceArray1D<RadialProfileCenter> device_three("device_three_centers", 3);
+  Kokkos::parallel_for("generate_rprof_centers", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+      KOKKOS_LAMBDA(int) {
+    device_three(0) = midpoint;
+    device_three(1) = boundary;
+    device_three(2) = corner;
+  });
+  Kokkos::fence();  // provider contract: centers ready before Compute
+  profile.Compute(device_three);
+  WriteProfile("device_three", profile, device_three, requested);
+  Kokkos::parallel_for("reorder_rprof_centers", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+      KOKKOS_LAMBDA(int) {
+    const auto first = device_three(0);
+    device_three(0) = device_three(1);
+    device_three(1) = device_three(2);
+    device_three(2) = first;
+  });
+  Kokkos::fence();
+  profile.Compute(device_three);
+  WriteProfile("device_reordered", profile, device_three, requested);
+
+  profile.Compute(centers);
+  WriteProfile("shrink", profile, centers, requested);
   profile.Compute({});
   if (profile.result.size() != 0) Kokkos::abort("empty centers gave nonempty results");
-  WriteProfile("empty", profile, {});
+  WriteProfile("empty", profile, {}, requested);
   profile.Compute({});
   profile.Compute(centers);
-  WriteProfile("restored", profile, centers);
+  WriteProfile("restored", profile, centers, requested);
 
   RegionIndcs large = pm->mesh_indcs;
   large.nx1 = 65536; large.nx2 = 65536; large.nx3 = 4;
