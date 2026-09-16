@@ -49,6 +49,7 @@ class ProblemGenerator {
   // function pointer for final work after main loop (e.g. compute errors).  Called by
   // Driver::Finalize()
   ProblemFinalizeFnPtr pgen_final_func=nullptr;
+  // function pointer for providing the radial profile centers.
   RadialProfileCenterFnPtr rprof_center_func = nullptr;
   // function pointer for user-enrolled BCs.  Called in ApplyPhysicalBCs in task list
   UserBoundaryFnPtr user_bcs_func=nullptr;

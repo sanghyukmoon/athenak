@@ -30,36 +30,14 @@ namespace {
   std::exit(EXIT_FAILURE);
 }
 
-Real CellWidth(Mesh *mesh) {
-  auto *pack = mesh->pmb_pack;
-  if (!mesh->three_d || mesh->multilevel || mesh->adaptive || mesh->pzoom != nullptr ||
-      !mesh->strictly_periodic || pack == nullptr ||
-      mesh->nmb_packs_thisrank != 1) {
-    Fail("only uniform 3D periodic meshes with one pack per rank are tested; "
-         "refinement, zoom, other dimensions/boundaries/packs are not yet tested");
-  }
-  auto *coord = pack->pcoord;
-  if (coord->is_general_relativistic || coord->is_dynamical_relativistic) {
-    Fail("non-Cartesian/curved geometry is not yet tested");
-  }
-  const auto &s = mesh->mesh_size;
-  const Real dx = s.dx1;
-  const Real tolerance = 32 * std::numeric_limits<Real>::epsilon() * dx;
-  if (!(dx > 0) || !std::isfinite(dx) || !std::isfinite(s.dx2) ||
-      !std::isfinite(s.dx3) || std::abs(s.dx2-dx) > tolerance ||
-      std::abs(s.dx3-dx) > tolerance) {
-    Fail("noncubic cells are not yet tested");
-  }
-  return dx;
-}
-
 int BinCount(Mesh *mesh, Real dx, Real rmax) {
-  const auto &s = mesh->mesh_size;
-  const Real half_box = 0.5 * std::min({s.x1max-s.x1min, s.x2max-s.x2min,
-                                        s.x3max-s.x3min});
+  const auto &ms = mesh->mesh_size;
+  const Real half_box = 0.5 * std::min(
+      {ms.x1max - ms.x1min, ms.x2max - ms.x2min, ms.x3max - ms.x3min}
+  );
   const Real tolerance = 16 * std::numeric_limits<Real>::epsilon();
-  if (!std::isfinite(rmax) || rmax < 0.5*dx || rmax > half_box) {
-    Fail("rmax must be finite and satisfy dx/2 <= rmax <= Lmin/2");
+  if (rmax < 0.5*dx || rmax > half_box) {
+    Fail("rmax must satisfy dx/2 <= rmax <= Lmin/2");
   }
   Real last = rmax/dx - Real(0.5);
   const Real aligned = std::round(last);
@@ -89,9 +67,8 @@ DvceArray5D<Real> Primitives(Mesh *mesh) {
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
-    : dr(CellWidth(mesh)), rmax(requested_rmax), nr(BinCount(mesh, dr, rmax)),
+    : dr(mesh->mesh_size.dx1), rmax(requested_rmax), nr(BinCount(mesh, dr, rmax)),
       final_edge((nr-0.5)*dr), mesh_(mesh) {
-  Primitives(mesh_);
 #if MPI_PARALLEL_ENABLED && defined(KOKKOS_ENABLE_CUDA)
 #if defined(OMPI_HAVE_MPI_EXT_CUDA) && OMPI_HAVE_MPI_EXT_CUDA
   if (MPIX_Query_cuda_support() != 1) {
