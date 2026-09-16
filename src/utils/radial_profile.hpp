@@ -27,8 +27,8 @@ class RadialProfile {
   RadialProfile(Mesh *mesh, Real rmax);
   void Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
-  const Real dr;
-  const int nr;
+  const Real bin_width;
+  const int num_bins;
   DvceArray3D<Real> result;  // (center, field, radial_bin); empty for no centers
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
