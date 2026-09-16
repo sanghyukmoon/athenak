@@ -38,10 +38,10 @@ DvceArray5D<Real> Primitives(Mesh *mesh) {
   } else if (pack->pmhd != nullptr) {
     primitive = pack->pmhd->w0;
   }
-  const auto &b = mesh->mb_indcs;
+  const auto &indcs = mesh->mb_indcs;
   if (primitive.extent(0) < static_cast<std::size_t>(pack->nmb_thispack) ||
-      primitive.extent(1) <= IDN || primitive.extent(2) <= b.ke ||
-      primitive.extent(3) <= b.je || primitive.extent(4) <= b.ie) {
+      primitive.extent(1) <= IDN || primitive.extent(2) <= indcs.ke ||
+      primitive.extent(3) <= indcs.je || primitive.extent(4) <= indcs.ie) {
     Fail("an available hydro or MHD primitive density array is required");
   }
   return primitive;
@@ -82,37 +82,39 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
   phase(timings.reset);
 
   const auto primitive = Primitives(mesh_);
-  const auto size = mesh_->pmb_pack->pmb->mb_size.d_view;
-  const auto b = mesh_->mb_indcs;
-  const auto s = mesh_->mesh_size;
-  const std::uint64_t nblock = mesh_->pmb_pack->nmb_thispack;
-  const std::uint64_t cells_per_block = std::uint64_t(b.nx1)*b.nx2*b.nx3;
-  if (nblock > 0 && ncenter > std::numeric_limits<std::int64_t>::max() /
-                              nblock / cells_per_block) Fail("cell loop overflow");
-  const auto device_centers = centers;
-  const Real dx = dr, cell_volume = s.dx1*s.dx2*s.dx3;
-  const Real length1 = s.x1max-s.x1min, length2 = s.x2max-s.x2min;
-  const Real length3 = s.x3max-s.x3min;
+  const auto mbsize = mesh_->pmb_pack->pmb->mb_size.d_view;
+  const auto indcs = mesh_->mb_indcs;
+  const auto &ms = mesh_->mesh_size;
+  const Real dvol = ms.dx1*ms.dx2*ms.dx3;
+  const Real lx1 = ms.x1max - ms.x1min;
+  const Real lx2 = ms.x2max - ms.x2min;
+  const Real lx3 = ms.x3max - ms.x3min;
+  const std::uint64_t nmb = mesh_->pmb_pack->nmb_thispack;
+  const std::uint64_t ncells = std::uint64_t(indcs.nx1)*indcs.nx2*indcs.nx3;
+  if (ncenter*nmb*ncells > std::numeric_limits<std::int64_t>::max()) {
+    Fail("cell loop overflow");
+  }
+  const Real dx = dr;
   const int bins = nr;
   par_for<std::int64_t>("radial_profile_accumulate", DevExeSpace(),
-      0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nblock)-1,
-      0, b.nx3-1, 0, b.nx2-1, 0, b.nx1-1,
+      0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
+      0, indcs.nx3-1, 0, indcs.nx2-1, 0, indcs.nx1-1,
       KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
-    const auto &block = size(m);
-    const auto &center = device_centers(c);
-    Real x = CellCenterX(i, b.nx1, block.x1min, block.x1max)-center.x1;
-    Real y = CellCenterX(j, b.nx2, block.x2min, block.x2max)-center.x2;
-    Real z = CellCenterX(k, b.nx3, block.x3min, block.x3max)-center.x3;
-    x -= length1*round(x/length1);
-    y -= length2*round(y/length2);
-    z -= length3*round(z/length3);
+    const auto &block = mbsize(m);
+    const auto &center = centers(c);
+    Real x = CellCenterX(i, indcs.nx1, block.x1min, block.x1max)-center.x1;
+    Real y = CellCenterX(j, indcs.nx2, block.x2min, block.x2max)-center.x2;
+    Real z = CellCenterX(k, indcs.nx3, block.x3min, block.x3max)-center.x3;
+    x -= lx1*round(x/lx1);
+    y -= lx2*round(y/lx2);
+    z -= lx3*round(z/lx3);
     const Real radial_index = floor(sqrt(x*x+y*y+z*z)/dx + Real(0.5));
     if (radial_index < bins) {
       const int bin = static_cast<int>(radial_index);
       auto sum = scatter.access();
-      sum(c, density, bin) += primitive(m, IDN, k+b.ks, j+b.js, i+b.is)
-                              * cell_volume;
-      sum(c, sampled_volume, bin) += cell_volume;
+      sum(c, density, bin) += primitive(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)
+                              * dvol;
+      sum(c, sampled_volume, bin) += dvol;
     }
   });
   Kokkos::Experimental::contribute(result, scatter);
