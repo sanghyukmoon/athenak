@@ -54,7 +54,7 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
       mesh_(mesh) {
 }
 
-void RadialProfile::Compute(const std::vector<RadialProfileCenter>& centers) {
+void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& centers) {
   timings = {};
   Kokkos::Timer clock;
   double start = 0;
@@ -70,24 +70,20 @@ void RadialProfile::Compute(const std::vector<RadialProfileCenter>& centers) {
   };
 
   if (measure_time) { Kokkos::fence(); clock.reset(); }
-  const std::uint64_t ncenter = centers.size();
+  const std::uint64_t ncenter = centers.extent(0);
   if (result.extent(0) != ncenter) {
     result = DvceArray3D<Real>("radial_profile", ncenter, nfields, nr);
     scatter_ = Scatter(result);
-    centers_ = DvceArray1D<RadialProfileCenter>("radial_centers", ncenter);
-    host_centers_ = Kokkos::create_mirror_view(centers_);
   }
   phase(timings.allocation);
-  if (centers.empty()) {
+  if (ncenter == 0) {
     Kokkos::fence();
     if (measure_time) timings.total = clock.seconds();
     return;
   }
-  for (std::size_t c=0; c<centers.size(); ++c) host_centers_(c) = centers[c];
-  Kokkos::deep_copy(centers_, host_centers_);
   scatter_.reset();
   Kokkos::deep_copy(result, 0.0);  // reset target as well as duplicated CPU storage
-  phase(timings.reset_transfer);
+  phase(timings.reset);
 
   const auto primitive = Primitives(mesh_);
   const auto size = mesh_->pmb_pack->pmb->mb_size.d_view;
@@ -97,7 +93,7 @@ void RadialProfile::Compute(const std::vector<RadialProfileCenter>& centers) {
   const std::uint64_t cells_per_block = std::uint64_t(b.nx1)*b.nx2*b.nx3;
   if (nblock > 0 && ncenter > std::numeric_limits<std::uint64_t>::max() /
                               nblock / cells_per_block) Fail("cell loop overflow");
-  const auto device_centers = centers_;
+  const auto device_centers = centers;
   const auto scatter = scatter_;
   const Real dx = dr, cell_volume = s.dx1*s.dx2*s.dx3;
   const Real length1 = s.x1max-s.x1min, length2 = s.x2max-s.x2min;

@@ -19,7 +19,7 @@ for n in (128, 256):
             samples = np.genfromtxt(file, delimiter=',', names=True)
             assert len(samples) == 21
             assert np.array_equal(samples['call'], np.arange(21))
-            phases = ['allocation', 'reset_transfer', 'accumulation',
+            phases = ['allocation', 'reset', 'accumulation',
                       'reduction', 'normalization']
             accounted = sum(samples[p] for p in phases)
             assert np.all(samples['total'] >= accounted-1e-9)
