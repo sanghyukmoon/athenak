@@ -50,7 +50,7 @@ DvceArray5D<Real> Primitives(Mesh *mesh) {
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
     : dr(mesh->mesh_size.dx1),
-      nr(static_cast<int>(std::floor((rmax - 0.5*dx) / dx)) + 1),
+      nr(static_cast<int>(std::floor((requested_rmax - 0.5*dr) / dr)) + 1),
       mesh_(mesh) {
 }
 
