@@ -29,20 +29,35 @@ namespace {
 #endif
   std::exit(EXIT_FAILURE);
 }
+
+// Consider:
+// -----------------------------------------------------
+// 0   |   1   |   2   | ... |   n-1   |     n     | ...
+//  0.5*dr  1.5*dr  2.5*dr      (n-0.5)*dr  (n+0.5)*dr
+// -----------------------------------------------------
+// If (n-0.5)*dr <= r < (n+0.5)*dr, then bin index = n
+KOKKOS_INLINE_FUNCTION
+int BinIndex(Real r, Real dr) {
+  return static_cast<int>(std::floor(r/dr + 0.5));
+}
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax)
     : bin_width(mesh->mesh_size.dx1),
-      num_bins(static_cast<int>(std::floor((requested_rmax - 0.5*bin_width) / bin_width)) + 1),
+      num_bins(BinIndex(requested_rmax, bin_width)),
       mesh_(mesh) {
 }
 
-void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& centers) {
-  timings = {};
+
+//----------------------------------------------------------------------------------------
+// \!fn void RadialProfile::Compute()
+// \brief
+
+DvceArray3D<Real> RadialProfile::Compute(
+    const DvceArray1D<const RadialProfileCenter>& centers) {
+  // Local timer lambda
   Kokkos::Timer clock;
   double start = 0;
-
-  // Local timer lambda
   auto phase = [&](double &seconds) {
     if (measure_time) {
       Kokkos::fence();
@@ -51,18 +66,20 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
       start = now;
     }
   };
-
-  if (measure_time) { Kokkos::fence(); clock.reset(); }
+  timings = {}; // clear previous timings
+  if (measure_time) {
+    Kokkos::fence();
+    clock.reset();
+  }
   const std::uint64_t ncenter = centers.extent(0);
-  result = DvceArray3D<Real>("radial_profile", ncenter, nfields, num_bins);
-  const auto scatter = Kokkos::Experimental::create_scatter_view(result);
+  auto rprof = DvceArray3D<Real>("radial_profile", ncenter, nfields, num_bins);
+  const auto scatter = Kokkos::Experimental::create_scatter_view(rprof);
   phase(timings.allocation);
   if (ncenter == 0) {
     Kokkos::fence();
     if (measure_time) timings.total = clock.seconds();
-    return;
+    return rprof;
   }
-  phase(timings.reset);
 
   // Capture variables
   DvceArray5D<Real> u0;
@@ -98,35 +115,41 @@ void RadialProfile::Compute(const DvceArray1D<const RadialProfileCenter>& center
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
-    const Real radial_index = floor(sqrt(x*x+y*y+z*z)/dr + Real(0.5));
-    if (radial_index < nbins) {
-      const int bin = static_cast<int>(radial_index);
+    const int bin = BinIndex(sqrt(x*x+y*y+z*z), dr);
+    if (bin < nbins) {
       auto sum = scatter.access();
-      sum(c, density, bin) += u0(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
-      sum(c, sampled_volume, bin) += dvol;
+      sum(c, shell_volume, bin) += dvol;
+      sum(c, shell_mass, bin) += u0(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      // TODO Add more fields...
     }
   });
-  Kokkos::Experimental::contribute(result, scatter);
+  Kokkos::Experimental::contribute(rprof, scatter);
   Kokkos::fence();  // complete device writes before MPI reads this memory
   phase(timings.accumulation);
+  // Reduce across MPI ranks, if any.
+  // Only rank 0's result is globally normalized and ready on return.
 #if MPI_PARALLEL_ENABLED
   const int count = static_cast<int>(ncenter*nfields*num_bins);
-  const int status = MPI_Reduce(global_variable::my_rank == 0 ? MPI_IN_PLACE : result.data(),
-      result.data(), count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD);
+  const int status = MPI_Reduce(
+      (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
+      (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
+      count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
+  );
   if (status != MPI_SUCCESS) Fail("device-buffer MPI_Reduce failed");
 #endif
   phase(timings.reduction);
   if (global_variable::my_rank == 0) {
-    const auto profile = result;
-    const Real empty = std::numeric_limits<Real>::quiet_NaN();
     par_for("radial_profile_normalize", DevExeSpace(),
         0, static_cast<int>(ncenter)-1, 0, nbins-1,
         KOKKOS_LAMBDA(int c, int bin) {
-      const Real volume = profile(c, sampled_volume, bin);
-      profile(c, density, bin) = volume > 0 ? profile(c, density, bin)/volume : empty;
+      const Real vshell = rprof(c, shell_volume, bin);
+      rprof(c, density, bin) = rprof(c, shell_mass, bin)/vshell;
+      // TODO Add more fields...
     });
   }
   Kokkos::fence();  // results ready for caller, including asynchronous GPU normalization
   phase(timings.normalization);
   if (measure_time) timings.total = clock.seconds();
+
+  return rprof;
 }
