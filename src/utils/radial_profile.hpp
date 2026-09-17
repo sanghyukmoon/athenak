@@ -28,7 +28,14 @@ class RadialProfile {
     shell_volume = 0,
     shell_mass = 1,
     density = 2,
-    nfields = 3};
+    velocity_x = 3,
+    velocity_y = 4,
+    velocity_z = 5,
+    velocity_mass_weighted_x = 6,
+    velocity_mass_weighted_y = 7,
+    velocity_mass_weighted_z = 8,
+    nfields = 9
+  };
   RadialProfile(Mesh *mesh, Real rmax);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
