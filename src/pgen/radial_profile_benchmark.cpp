@@ -55,7 +55,14 @@ void WriteProfile(const std::string &label, const RadialProfile &profile,
         << ' ' << center.x3 << '\n';
     for (int bin=0; bin<profile.num_bins; ++bin) {
       out << bin*profile.bin_width << ' ' << host(c, RadialProfile::density, bin) << ' '
-          << host(c, RadialProfile::shell_volume, bin) << '\n';
+          << host(c, RadialProfile::shell_volume, bin) << ' '
+          << host(c, RadialProfile::shell_mass, bin) << ' '
+          << host(c, RadialProfile::velocity_x, bin) << ' '
+          << host(c, RadialProfile::velocity_y, bin) << ' '
+          << host(c, RadialProfile::velocity_z, bin) << ' '
+          << host(c, RadialProfile::velocity_mass_weighted_x, bin) << ' '
+          << host(c, RadialProfile::velocity_mass_weighted_y, bin) << ' '
+          << host(c, RadialProfile::velocity_mass_weighted_z, bin) << '\n';
     }
   }
   if (!out) Kokkos::abort("cannot write radial profile diagnostic");
@@ -86,39 +93,64 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   RadialProfile profile(pm, requested);
   Kokkos::fence();
   const double setup_seconds = performance ? setup.seconds() : 0;
+  profile.measure_time = performance &&
+      pin->GetOrAddBoolean("problem", "phase_timings", false);
   DvceArray3D<Real> rprof;
   if (performance) {
-    profile.measure_time = true;
     const int repeats = pin->GetOrAddInteger("problem", "repeats", 20);
     if (repeats < 1) Kokkos::abort("benchmark requires at least one repeat");
     std::vector<RadialProfile::Timings> times;
     times.reserve(repeats+1);
+    std::vector<double> wall_times;
+    wall_times.reserve(repeats+1);
+#ifdef KOKKOS_ENABLE_CUDA
+    std::size_t free_before, total_before, free_after, total_after;
+    if (cudaMemGetInfo(&free_before, &total_before) != cudaSuccess) {
+      Kokkos::abort("cudaMemGetInfo failed before calculation");
+    }
+#endif
     for (int call=0; call<=repeats; ++call) {
+      rprof = {};  // release the previous result outside the measured call
+      Kokkos::fence();
+      Kokkos::Timer wall;
       rprof = profile.Compute(centers);
+      Kokkos::fence();
+      wall_times.push_back(wall.seconds());  // includes local ScatterView destruction
       times.push_back(profile.timings);
     }
+#ifdef KOKKOS_ENABLE_CUDA
+    if (cudaMemGetInfo(&free_after, &total_after) != cudaSuccess) {
+      Kokkos::abort("cudaMemGetInfo failed after calculation");
+    }
+#endif
     // All host copies, memory queries, and writing occur outside measured regions.
     const std::string rank = std::to_string(global_variable::my_rank);
     std::ofstream out("timings_rank"+rank+".csv");
     out << std::setprecision(17)
-        << "call,setup,allocation,accumulation,reduction,normalization,total\n";
+        << "call,setup,wall_total";
+    if (profile.measure_time) {
+      out << ",allocation,accumulation,reduction,normalization,total";
+    }
+    out << '\n';
     for (std::size_t call=0; call<times.size(); ++call) {
       const auto &t = times[call];
-      out << call << ',' << (call == 0 ? setup_seconds : 0) << ',' << t.allocation << ','
-          << t.accumulation << ',' << t.reduction << ','
-          << t.normalization << ',' << t.total << '\n';
+      out << call << ',' << (call == 0 ? setup_seconds : 0) << ',' << wall_times[call];
+      if (profile.measure_time) {
+        out << ',' << t.allocation << ',' << t.accumulation << ',' << t.reduction << ','
+            << t.normalization << ',' << t.total;
+      }
+      out << '\n';
     }
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
     std::ofstream memory("memory_rank"+rank+".txt");
-    memory << "peak_rss_kib " << usage.ru_maxrss << '\n';
+    memory << "peak_rss_kib " << usage.ru_maxrss << '\n'
+           << "result_array_bytes " << rprof.size()*sizeof(Real) << '\n';
 #ifdef KOKKOS_ENABLE_CUDA
-    std::size_t free_bytes, total_bytes;
-    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-      Kokkos::abort("cudaMemGetInfo failed");
-    }
-    memory << "device_used_bytes " << total_bytes-free_bytes << '\n'
-           << "device_total_bytes " << total_bytes << '\n';
+    // Device-wide usage includes mesh storage, runtime state and other GPU users.
+    memory << "device_used_before_bytes " << total_before-free_before << '\n'
+           << "device_used_after_bytes " << total_after-free_after << '\n'
+           << "device_total_bytes " << total_after << '\n';
 #endif
     if (!out || !memory) Kokkos::abort("cannot write benchmark diagnostics");
     WriteProfile("performance", profile, rprof, centers, requested);
@@ -138,6 +170,11 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   placement << "cuda_device " << device << '\n' << "pci_bus " << bus << '\n';
 #endif
   if (!placement) Kokkos::abort("cannot write device placement");
+  if (pin->GetOrAddBoolean("problem", "accuracy_only", false)) {
+    rprof = profile.Compute(centers);
+    WriteProfile("single", profile, rprof, centers, requested);
+    return;
+  }
   PoisonGhostDensity(pm);
   rprof = profile.Compute({});
   if (rprof.size() != 0) Kokkos::abort("initial empty result is not empty");
@@ -224,6 +261,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto *eos = pack->phydro != nullptr ? pack->phydro->peos : pack->pmhd->peos;
   if (eos->eos_data.is_ideal) Kokkos::abort("benchmark requires isothermal EOS");
   const bool varying = pin->GetOrAddBoolean("problem", "varying", true);
+  const bool varying_velocity = pin->GetOrAddBoolean("problem", "varying_velocity", false);
   const auto b = pmy_mesh_->mb_indcs;
   const auto size = pack->pmb->mb_size.d_view;
   auto u = pack->phydro != nullptr ? pack->phydro->u0 : pack->pmhd->u0;
@@ -239,7 +277,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     const Real x = CellCenterX(i-b.is, b.nx1, s.x1min, s.x1max);
     const Real y = CellCenterX(j-b.js, b.nx2, s.x2min, s.x2max);
     const Real z = CellCenterX(k-b.ks, b.nx3, s.x3min, s.x3max);
-    u(m, IDN, k, j, i) = varying ?
+    const Real density = varying ?
         1.0 + 0.1*cos(M_PI*x/2) + 0.05*sin(M_PI*y/2) + 0.025*cos(M_PI*z/2) : 1.0;
+    u(m, IDN, k, j, i) = density;
+    if (varying_velocity) {
+      u(m, IM1, k, j, i) = density*(0.3 + 0.2*cos(M_PI*x/2));
+      u(m, IM2, k, j, i) = density*(-0.2 + 0.15*sin(M_PI*y/2));
+      u(m, IM3, k, j, i) = density*(0.1 + 0.1*cos(M_PI*z/2));
+    }
   });
 }
