@@ -23,22 +23,27 @@ using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 // extent is the active count; the calculator neither modifies nor retains them.
 class RadialProfile {
  public:
-  enum Field {density = 0, sampled_volume = 1, nfields = 2};
+   // TODO is it possible to get length of enum, instead of assigning nfield here?
+  enum Field {
+    shell_volume = 0,
+    shell_mass = 1,
+    density = 2,
+    nfields = 3};
   RadialProfile(Mesh *mesh, Real rmax);
-  void Compute(const DvceArray1D<const RadialProfileCenter>& centers);
-
-  const Real bin_width;
-  const int num_bins;
-  DvceArray3D<Real> result;  // (center, field, radial_bin); empty for no centers
+  DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
   struct Timings {
-    double allocation = 0, reset = 0, accumulation = 0;
+    double allocation = 0, accumulation = 0;
     double reduction = 0, normalization = 0, total = 0;
   } timings;
 
+  const Real bin_width;
+  const int num_bins;
+
  private:
   Mesh *mesh_;
+
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_

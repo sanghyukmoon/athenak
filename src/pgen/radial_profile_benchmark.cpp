@@ -99,7 +99,7 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
     const std::string rank = std::to_string(global_variable::my_rank);
     std::ofstream out("timings_rank"+rank+".csv");
     out << std::setprecision(17)
-        << "call,setup,allocation,reset,accumulation,reduction,normalization,total\n";
+        << "call,setup,allocation,accumulation,reduction,normalization,total\n";
     for (std::size_t call=0; call<times.size(); ++call) {
       const auto &t = times[call];
       out << call << ',' << (call == 0 ? setup_seconds : 0) << ',' << t.allocation << ','
