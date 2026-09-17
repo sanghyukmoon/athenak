@@ -16,7 +16,7 @@ struct RadialProfileCenter {
 // Providers return a managed device view with all center writes completed.
 using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 
-// Whole-cell density on uniform, cubic-cell, periodic Cartesian meshes.
+// Radial shell averages on uniform, cubic-cell, periodic Cartesian meshes.
 // The caller supplies identical ordered centers on every MPI rank. Only rank 0's
 // returned view is globally normalized and ready on return. Returned views own
 // their data and remain valid across subsequent Compute calls.
@@ -37,7 +37,7 @@ class RadialProfile {
     velocity_mass_weighted_z = 8,
     nfields = 9
   };
-  RadialProfile(Mesh *mesh, Real rmax);
+  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
@@ -49,6 +49,8 @@ class RadialProfile {
 
   const Real bin_width;
   const int num_bins;
+  const int nbins_subcell;
+  const int nsub;
 
  private:
   Mesh *mesh_;
