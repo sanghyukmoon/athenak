@@ -81,7 +81,7 @@ void WriteProfile(const std::string &label, const RadialProfile &profile,
   out << "# bin_width num_bins requested_rmax final_edge ncenter\n"
       << profile.bin_width << ' ' << profile.num_bins << ' ' << requested_rmax << ' '
       << (profile.num_bins-0.5)*profile.bin_width << ' ' << centers.extent(0) << '\n';
-  out << "# nbins_subcell nsub\n" << "# " << profile.nbins_subcell << ' '
+  out << "# nbins_subcell nsub\n" << "# " << profile.num_bins_subcell << ' '
       << profile.nsub << '\n';
   for (std::size_t c=0; c<centers.extent(0); ++c) {
     const auto &center = host_centers(c);

@@ -49,7 +49,7 @@ class RadialProfile {
 
   const Real bin_width;
   const int num_bins;
-  const int nbins_subcell;
+  const int num_bins_subcell;
   const int nsub;
 
  private:
