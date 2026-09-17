@@ -18,7 +18,8 @@ using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 
 // Whole-cell density on uniform, cubic-cell, periodic Cartesian meshes.
 // The caller supplies identical ordered centers on every MPI rank. Only rank 0's
-// result is globally normalized and ready on return; it is valid until Compute.
+// returned view is globally normalized and ready on return. Returned views own
+// their data and remain valid across subsequent Compute calls.
 // Centers must be ready before Compute and unchanged until it returns. Their view
 // extent is the active count; the calculator neither modifies nor retains them.
 class RadialProfile {
