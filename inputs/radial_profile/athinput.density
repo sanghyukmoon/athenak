@@ -32,9 +32,12 @@ iso_sound_speed = 1.0
 varying = true
 varying_velocity = false
 accuracy_only = false
+subcell_fixture = false
 phase_timings = false
 performance = false
 rmax = 2.0
+nbins_subcell = 4
+nsub = 4
 repeats = 20
 <mesh_refinement>
 refinement = none
