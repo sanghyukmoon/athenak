@@ -1,5 +1,7 @@
-// Static analytic fixture. Diagnostic text is for tests, not a persistent rprof format.
+// Analytic static/dynamic fixture. Diagnostic text is for tests, not a persistent rprof format.
 #include <sys/resource.h>
+#include <sched.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
@@ -8,6 +10,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <type_traits>
 
 #include "athena.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -18,8 +21,11 @@
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 #include "utils/radial_profile.hpp"
+#include "utils/benchmark_timer.hpp"
+#include "bvals/bvals.hpp"
 
 namespace {
+int center_count = 1;
 RadialProfileCenter MidpointCell(const RegionSize &box, const RegionIndcs &grid) {
   const std::uint64_t nx = grid.nx1, ny = grid.nx2;
   const std::uint64_t i = nx/2, j = ny/2, k = std::uint64_t(grid.nx3)/2;
@@ -30,8 +36,26 @@ RadialProfileCenter MidpointCell(const RegionSize &box, const RegionIndcs &grid)
 }
 
 DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm) {
-  DualArray1D<RadialProfileCenter> centers("domain_center", 1);
-  centers.view_host()(0) = MidpointCell(pm->mesh_size, pm->mesh_indcs);
+  DualArray1D<RadialProfileCenter> centers("domain_center", center_count);
+  const auto &box = pm->mesh_size;
+  const auto &grid = pm->mesh_indcs;
+  const int side = center_count == 64 ? 4 : 2;
+  if (center_count == 1) {
+    centers.view_host()(0) = MidpointCell(box, grid);
+  } else {
+    for (int z=0, c=0; z<side; ++z) {
+      for (int y=0; y<side; ++y) {
+        for (int x=0; x<side; ++x, ++c) {
+          const std::uint64_t i = (2*x+1)*grid.nx1/(2*side);
+          const std::uint64_t j = (2*y+1)*grid.nx2/(2*side);
+          const std::uint64_t k = (2*z+1)*grid.nx3/(2*side);
+          centers.view_host()(c) = {i + std::uint64_t(grid.nx1)*(j+grid.nx2*k),
+              box.x1min+(i+0.5)*box.dx1, box.x2min+(j+0.5)*box.dx2,
+              box.x3min+(k+0.5)*box.dx3};
+        }
+      }
+    }
+  }
   centers.modify_host();
   centers.sync_device();
   return centers.view_device();
@@ -83,80 +107,6 @@ void PoisonGhostDensity(Mesh *pm) {
 }
 
 void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
-  const auto &s = pm->mesh_size;
-  const Real requested = pin->GetOrAddReal("problem", "rmax",
-      0.5*std::min({s.x1max-s.x1min, s.x2max-s.x2min, s.x3max-s.x3min}));
-  const bool performance = pin->GetOrAddBoolean("problem", "performance", false);
-  const auto centers = pm->pgen->rprof_center_func(pm);  // provider excluded from timing
-  Kokkos::fence();
-  Kokkos::Timer setup;
-  RadialProfile profile(pm, requested);
-  Kokkos::fence();
-  const double setup_seconds = performance ? setup.seconds() : 0;
-  profile.measure_time = performance &&
-      pin->GetOrAddBoolean("problem", "phase_timings", false);
-  DvceArray3D<Real> rprof;
-  if (performance) {
-    const int repeats = pin->GetOrAddInteger("problem", "repeats", 20);
-    if (repeats < 1) Kokkos::abort("benchmark requires at least one repeat");
-    std::vector<RadialProfile::Timings> times;
-    times.reserve(repeats+1);
-    std::vector<double> wall_times;
-    wall_times.reserve(repeats+1);
-#ifdef KOKKOS_ENABLE_CUDA
-    std::size_t free_before, total_before, free_after, total_after;
-    if (cudaMemGetInfo(&free_before, &total_before) != cudaSuccess) {
-      Kokkos::abort("cudaMemGetInfo failed before calculation");
-    }
-#endif
-    for (int call=0; call<=repeats; ++call) {
-      rprof = {};  // release the previous result outside the measured call
-      Kokkos::fence();
-      Kokkos::Timer wall;
-      rprof = profile.Compute(centers);
-      Kokkos::fence();
-      wall_times.push_back(wall.seconds());  // includes local ScatterView destruction
-      times.push_back(profile.timings);
-    }
-#ifdef KOKKOS_ENABLE_CUDA
-    if (cudaMemGetInfo(&free_after, &total_after) != cudaSuccess) {
-      Kokkos::abort("cudaMemGetInfo failed after calculation");
-    }
-#endif
-    // All host copies, memory queries, and writing occur outside measured regions.
-    const std::string rank = std::to_string(global_variable::my_rank);
-    std::ofstream out("timings_rank"+rank+".csv");
-    out << std::setprecision(17)
-        << "call,setup,wall_total";
-    if (profile.measure_time) {
-      out << ",allocation,accumulation,reduction,normalization,total";
-    }
-    out << '\n';
-    for (std::size_t call=0; call<times.size(); ++call) {
-      const auto &t = times[call];
-      out << call << ',' << (call == 0 ? setup_seconds : 0) << ',' << wall_times[call];
-      if (profile.measure_time) {
-        out << ',' << t.allocation << ',' << t.accumulation << ',' << t.reduction << ','
-            << t.normalization << ',' << t.total;
-      }
-      out << '\n';
-    }
-    struct rusage usage;
-    getrusage(RUSAGE_SELF, &usage);
-    std::ofstream memory("memory_rank"+rank+".txt");
-    memory << "peak_rss_kib " << usage.ru_maxrss << '\n'
-           << "result_array_bytes " << rprof.size()*sizeof(Real) << '\n';
-#ifdef KOKKOS_ENABLE_CUDA
-    // Device-wide usage includes mesh storage, runtime state and other GPU users.
-    memory << "device_used_before_bytes " << total_before-free_before << '\n'
-           << "device_used_after_bytes " << total_after-free_after << '\n'
-           << "device_total_bytes " << total_after << '\n';
-#endif
-    if (!out || !memory) Kokkos::abort("cannot write benchmark diagnostics");
-    WriteProfile("performance", profile, rprof, centers, requested);
-    return;
-  }
-
   std::ofstream placement("placement_rank"+std::to_string(global_variable::my_rank)+".txt");
   placement << "blocks " << pm->pmb_pack->nmb_thispack << '\n'
             << "execution_concurrency " << DevExeSpace().concurrency() << '\n';
@@ -169,7 +119,147 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   }
   placement << "cuda_device " << device << '\n' << "pci_bus " << bus << '\n';
 #endif
+  cpu_set_t affinity;
+  CPU_ZERO(&affinity);
+  sched_getaffinity(0, sizeof(affinity), &affinity);
+  char hostname[256];
+  gethostname(hostname, sizeof(hostname));
+  placement << "hostname " << hostname << '\n' << "cpu_count " << CPU_COUNT(&affinity)
+            << '\n' << "cpu_ids ";
+  for (int cpu=0; cpu<CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &affinity)) placement << cpu << ' ';
+  }
+  placement << '\n';
   if (!placement) Kokkos::abort("cannot write device placement");
+  if (pin->GetOrAddBoolean("problem", "check_evolution", false)) {
+    const auto *mhd = pm->pmb_pack->pmhd;
+    const auto u = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mhd->u0);
+    const auto bcc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mhd->bcc0);
+    const auto &b = pm->mb_indcs;
+    double mass = 0, min_density = 1e100;
+    bool finite = true;
+    for (int m=0; m<pm->pmb_pack->nmb_thispack; ++m) {
+      for (int k=b.ks; k<=b.ke; ++k) for (int j=b.js; j<=b.je; ++j) {
+        for (int i=b.is; i<=b.ie; ++i) {
+          mass += u(m, IDN, k, j, i)*pm->mesh_size.dx1*
+                  pm->mesh_size.dx2*pm->mesh_size.dx3;
+          min_density = std::min(min_density, double(u(m, IDN, k, j, i)));
+          for (int n=0; n<4; ++n) finite &= std::isfinite(u(m,n,k,j,i));
+          for (int n=0; n<3; ++n) finite &= std::isfinite(bcc(m,n,k,j,i));
+        }
+      }
+    }
+    std::ofstream state("state_rank"+std::to_string(global_variable::my_rank)+".txt");
+    state << std::setprecision(17) << "mass " << mass << '\n'
+          << "min_density " << min_density << '\n' << "finite " << finite << '\n'
+          << "cycles " << pm->ncycle << '\n';
+  }
+  if (pm->pmb_pack->pmhd != nullptr) {
+    const auto *m = pm->pmb_pack->pmhd;
+    std::ofstream allocation("allocations_rank"+
+                            std::to_string(global_variable::my_rank)+".csv");
+    allocation << "category,array,bytes\n";
+    auto record = [&](const char *category, const char *name, const auto &view) {
+      using Value = typename std::decay_t<decltype(view)>::non_const_value_type;
+      allocation << category << ',' << name << ',' << view.size()*sizeof(Value) << '\n';
+    };
+    record("state", "u0", m->u0);
+    record("state", "w0", m->w0);
+    record("state", "bcc0", m->bcc0);
+    record("state", "b0.x1f", m->b0.x1f);
+    record("state", "b0.x2f", m->b0.x2f);
+    record("state", "b0.x3f", m->b0.x3f);
+    record("integration", "u1", m->u1);
+    record("integration", "b1.x1f", m->b1.x1f);
+    record("integration", "b1.x2f", m->b1.x2f);
+    record("integration", "b1.x3f", m->b1.x3f);
+    record("integration", "uflx.x1f", m->uflx.x1f);
+    record("integration", "uflx.x2f", m->uflx.x2f);
+    record("integration", "uflx.x3f", m->uflx.x3f);
+    record("integration", "efld.x1e", m->efld.x1e);
+    record("integration", "efld.x2e", m->efld.x2e);
+    record("integration", "efld.x3e", m->efld.x3e);
+    record("integration", "e3x1", m->e3x1);
+    record("integration", "e2x1", m->e2x1);
+    record("integration", "e1x2", m->e1x2);
+    record("integration", "e3x2", m->e3x2);
+    record("integration", "e2x3", m->e2x3);
+    record("integration", "e1x3", m->e1x3);
+    // These three private arrays have the same cell shape as e1x2 (mhd.cpp).
+    allocation << "integration,private_cell_E_source_shape,"
+               << 3*m->e1x2.size()*sizeof(Real) << '\n';
+    record("reconstruction", "wl3d", m->wl3d);
+    record("reconstruction", "wr3d", m->wr3d);
+    record("reconstruction", "bl3d", m->bl3d);
+    record("reconstruction", "br3d", m->br3d);
+#if MPI_PARALLEL_ENABLED
+    for (auto *boundary : {static_cast<MeshBoundaryValues*>(m->pbval_u),
+                           static_cast<MeshBoundaryValues*>(m->pbval_b)}) {
+      record("communication", "rank_send_vars", boundary->rank_sendbuf_vars_);
+      record("communication", "rank_recv_vars", boundary->rank_recvbuf_vars_);
+      record("communication", "send_offsets", boundary->send_agg_offset_);
+      record("communication", "recv_offsets", boundary->recv_agg_offset_);
+      record("host_communication", "send_headers", boundary->rank_sendhdr_vars_);
+      record("host_communication", "recv_headers", boundary->rank_recvhdr_vars_);
+    }
+#endif
+    for (int n=0; n<56; ++n) {
+      for (auto *boundary : {static_cast<MeshBoundaryValues*>(m->pbval_u),
+                             static_cast<MeshBoundaryValues*>(m->pbval_b)}) {
+        record("communication", "send_vars", boundary->sendbuf[n].vars);
+        record("communication", "recv_vars", boundary->recvbuf[n].vars);
+        record("communication", "send_flux", boundary->sendbuf[n].flux);
+        record("communication", "recv_flux", boundary->recvbuf[n].flux);
+      }
+    }
+  }
+  if (!pin->GetOrAddBoolean("problem", "profiles", true)) return;
+  const auto &s = pm->mesh_size;
+  const Real requested = pin->GetOrAddReal("problem", "rmax",
+      0.5*std::min({s.x1max-s.x1min, s.x2max-s.x2min, s.x3max-s.x3min}));
+  const bool performance = pin->GetOrAddBoolean("problem", "performance", false);
+  const auto centers = pm->pgen->rprof_center_func(pm);  // provider excluded from timing
+  if (!performance) {
+    const auto host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), centers);
+    std::ofstream metadata("centers_rank"+std::to_string(global_variable::my_rank)+".txt");
+    metadata << std::setprecision(17);
+    for (std::size_t c=0; c<centers.extent(0); ++c) {
+      metadata << host(c).id << ' ' << host(c).x1 << ' ' << host(c).x2 << ' '
+               << host(c).x3 << '\n';
+    }
+  }
+  Kokkos::fence();
+  RadialProfile profile(pm, requested);
+  Kokkos::fence();
+  profile.measure_time = performance &&
+      pin->GetOrAddBoolean("problem", "phase_timings", false);
+  DvceArray3D<Real> rprof;
+  if (performance) {
+    BenchmarkTimer timer(pin->GetOrAddInteger("problem", "repeats", 20),
+                         pin->GetOrAddReal("problem", "warmup_seconds", 0.0));
+    std::vector<RadialProfile::Timings> phases;
+    while (!timer.Done()) {
+      rprof = {};  // release previous result before fences, barrier and timer
+      timer.Start();
+      rprof = profile.Compute(centers);
+      timer.Stop();  // includes Compute return and local ScatterView destruction
+      phases.push_back(profile.timings);
+    }
+    timer.Write("profile_timings", rprof.size()*sizeof(Real));
+    if (profile.measure_time) {
+      std::ofstream out("phases_rank"+std::to_string(global_variable::my_rank)+".csv");
+      out << std::setprecision(17)
+          << "sample,allocation,accumulation,reduction,normalization,total\n";
+      for (std::size_t i=0; i<phases.size(); ++i) {
+        const auto &t = phases[i];
+        out << i << ',' << t.allocation << ',' << t.accumulation << ','
+            << t.reduction << ',' << t.normalization << ',' << t.total << '\n';
+      }
+      if (!out) Kokkos::abort("cannot write profile phases");
+    }
+    return;
+  }
+
   if (pin->GetOrAddBoolean("problem", "accuracy_only", false)) {
     rprof = profile.Compute(centers);
     WriteProfile("single", profile, rprof, centers, requested);
@@ -250,13 +340,16 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
 }  // namespace
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+  center_count = pin->GetOrAddInteger("problem", "center_count", 1);
+  if (center_count != 1 && center_count != 8 && center_count != 64) {
+    Kokkos::abort("center_count must be 1, 8 or 64");
+  }
   rprof_center_func = DomainCenter;
   pgen_final_func = BenchmarkRadialProfile;
   if (restart) return;
   auto *pack = pmy_mesh_->pmb_pack;
-  if (pin->GetString("time", "evolution") != "static" ||
-      (pack->phydro == nullptr && pack->pmhd == nullptr)) {
-    Kokkos::abort("radial_profile_benchmark requires static hydro or MHD");
+  if (pack->phydro == nullptr && pack->pmhd == nullptr) {
+    Kokkos::abort("radial_profile_benchmark requires hydro or MHD");
   }
   auto *eos = pack->phydro != nullptr ? pack->phydro->peos : pack->pmhd->peos;
   if (eos->eos_data.is_ideal) Kokkos::abort("benchmark requires isothermal EOS");
@@ -267,9 +360,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto u = pack->phydro != nullptr ? pack->phydro->u0 : pack->pmhd->u0;
   Kokkos::deep_copy(u, 0.0);
   if (pack->pmhd != nullptr) {
-    Kokkos::deep_copy(pack->pmhd->b0.x1f, 0.0);
-    Kokkos::deep_copy(pack->pmhd->b0.x2f, 0.0);
-    Kokkos::deep_copy(pack->pmhd->b0.x3f, 0.0);
+    Kokkos::deep_copy(pack->pmhd->b0.x1f, 1.0);
+    Kokkos::deep_copy(pack->pmhd->b0.x2f, 0.5);
+    Kokkos::deep_copy(pack->pmhd->b0.x3f, 0.25);
   }
   par_for("radial_profile_initial_density", DevExeSpace(), 0, pack->nmb_thispack-1,
       b.ks, b.ke, b.js, b.je, b.is, b.ie, KOKKOS_LAMBDA(int m, int k, int j, int i) {
