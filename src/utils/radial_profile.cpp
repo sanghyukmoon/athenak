@@ -98,6 +98,7 @@ DvceArray3D<Real> RadialProfile::Compute(
       "subcell_parents", ncenter*side*side*side
   );
   Kokkos::DualView<int> parent_count("subcell_parent_count");
+  auto parent_count_dview = parent_count.view_device();
   phase(timings.allocation);
   if (ncenter == 0) {
     Kokkos::fence();
@@ -130,78 +131,67 @@ DvceArray3D<Real> RadialProfile::Compute(
   const Real dr = bin_width;
   const int nbins = num_bins;
   const int nbins_sub = num_bins_subcell;
-  auto device_count = parent_count.view_device();
-  par_for<std::int64_t>("radial_profile_accumulate", DevExeSpace(),
-      0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
-      indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
-      KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
+  const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
+  const Real dvol_subcell = dvol/nsub/nsub/nsub;
+  const int nsubcells = nsub;
+
+  // Kokkos lambda function to find bin and dump the cell data into that bin
+  // Negative isub indicates that this is a parent cell, not a subcell.
+  const auto DumpCellToBin = KOKKOS_LAMBDA(
+      int c, int m, int k, int j, int i, int ksub, int jsub, int isub) -> int {
+    const bool is_subcell = isub >= 0;
     const auto &block_size = meshblock_sizes(m);
     const auto &center = centers(c);
     Real x = CellCenterX(i-indcs.is, indcs.nx1, block_size.x1min, block_size.x1max) - center.x1;
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
     Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
+    if (is_subcell) {
+      x += ((isub+0.5)/nsubcells-0.5)*dx1;
+      y += ((jsub+0.5)/nsubcells-0.5)*dx2;
+      z += ((ksub+0.5)/nsubcells-0.5)*dx3;
+    }
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
     const int bin = BinIndex(sqrt(x*x+y*y+z*z), dr);
-    // Radial binning without subcell correction.
-    if (nbins_sub <= bin && bin < nbins) {
+    const bool is_valid_bin = is_subcell ? bin < nbins_sub
+                                  : nbins_sub <= bin && bin < nbins;
+    if (is_valid_bin) {
+      const Real volume = is_subcell ? dvol_subcell : dvol;
       auto sum = scatter.access();
-      sum(c, shell_volume, bin) += dvol;
-      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i)*dvol;
-      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i)*dvol;
-      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i)*dvol;
-      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i)*dvol;
-      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i)*dvol;
-      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i)*dvol;
-      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i)*dvol;
+      sum(c, shell_volume, bin) += volume;
+      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i)*volume;
+      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i)*volume;
+      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i)*volume;
+      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i)*volume;
+      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i)*volume;
+      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i)*volume;
+      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i)*volume;
       // TODO Add more fields...
     }
-    // Record parent cell information for subcell correction
-    // IMPORTANT: this should not be "else if". bin=nbins_sub contributes to both the
-    // inner bin through the subcells, and the outer bin through the parent cell.
+    return bin;
+  };
+  // END_KOKKOS_LAMBDA
+
+  // Now, perform the actual calculation
+  par_for<std::int64_t>("radial_binning", DevExeSpace(),
+      0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
+      indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
+      KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
+    const int bin = DumpCellToBin(c, m, k, j, i, -1, -1, -1);
+    // Record parent cell information needed for the subsequent subcell corection.
     if (nbins_sub > 0 && bin <= nbins_sub) {
-      const int parent_idx = Kokkos::atomic_fetch_add(&device_count(), 1);
-      parent_cells(parent_idx) = {c, m, k, j, i};
+      const int idx = Kokkos::atomic_fetch_add(&parent_count_dview(), 1);
+      parent_cells(idx) = {c, m, k, j, i};
     }
   });
   parent_count.modify_device();
   parent_count.sync_host();
-  // Capture variables
-  const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
-  const Real dvol_sub = dvol/nsub/nsub/nsub;
-  const int nsubcells = nsub;
-  par_for("radial_profile_subcells", DevExeSpace(), 0, parent_count.view_host()()-1,
+  par_for("subcell_correction", DevExeSpace(), 0, parent_count.view_host()()-1,
       0, nsub-1, 0, nsub-1, 0, nsub-1,
       KOKKOS_LAMBDA(int idx, int ksub, int jsub, int isub) {
     const auto &parent = parent_cells(idx);
-    const int c = parent.c, m = parent.m;
-    const int k = parent.k, j = parent.j, i = parent.i;
-    // TODO This duplicates the previous loop
-    const auto &block_size = meshblock_sizes(m);
-    const auto &center = centers(c);
-    Real x = CellCenterX(i-indcs.is, indcs.nx1, block_size.x1min, block_size.x1max) - center.x1
-             + ((isub+0.5)/nsubcells-0.5)*dx1;
-    Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2
-             + ((jsub+0.5)/nsubcells-0.5)*dx2;
-    Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3
-             + ((ksub+0.5)/nsubcells-0.5)*dx3;
-    x -= lx1*round(x/lx1);
-    y -= lx2*round(y/lx2);
-    z -= lx3*round(z/lx3);
-    const int bin = BinIndex(sqrt(x*x+y*y+z*z), dr);
-    if (bin < nbins_sub) {
-      auto sum = scatter.access();
-      sum(c, shell_volume, bin) += dvol_sub;
-      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i)*dvol_sub;
-      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i)*dvol_sub;
-      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i)*dvol_sub;
-      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i)*dvol_sub;
-      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i)*dvol_sub;
-      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i)*dvol_sub;
-      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i)*dvol_sub;
-      // TODO Add more fields...
-    }
+    DumpCellToBin(parent.c, parent.m, parent.k, parent.j, parent.i, ksub, jsub, isub);
   });
   Kokkos::Experimental::contribute(rprof, scatter);
   Kokkos::fence();  // complete device writes before MPI reads this memory
@@ -218,6 +208,8 @@ DvceArray3D<Real> RadialProfile::Compute(
   if (status != MPI_SUCCESS) Fail("device-buffer MPI_Reduce failed");
 #endif
   phase(timings.reduction);
+
+  // Normalize radial profiles
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
         0, static_cast<int>(ncenter)-1, 0, nbins-1,
