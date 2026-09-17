@@ -26,6 +26,7 @@
 
 namespace {
 int center_count = 1;
+bool subcell_fixture = false;
 RadialProfileCenter MidpointCell(const RegionSize &box, const RegionIndcs &grid) {
   const std::uint64_t nx = grid.nx1, ny = grid.nx2;
   const std::uint64_t i = nx/2, j = ny/2, k = std::uint64_t(grid.nx3)/2;
@@ -36,11 +37,18 @@ RadialProfileCenter MidpointCell(const RegionSize &box, const RegionIndcs &grid)
 }
 
 DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm) {
-  DualArray1D<RadialProfileCenter> centers("domain_center", center_count);
+  DualArray1D<RadialProfileCenter> centers("domain_center",
+                                           subcell_fixture ? 3 : center_count);
   const auto &box = pm->mesh_size;
   const auto &grid = pm->mesh_indcs;
   const int side = center_count == 64 ? 4 : 2;
-  if (center_count == 1) {
+  if (subcell_fixture) {
+    const auto midpoint = MidpointCell(box, grid);
+    centers.view_host()(0) = midpoint;
+    centers.view_host()(1) = {0, box.x1min, box.x2min, box.x3min};
+    centers.view_host()(2) = {1, midpoint.x1+0.31*box.dx1,
+                               midpoint.x2-0.27*box.dx2, midpoint.x3+0.43*box.dx3};
+  } else if (center_count == 1) {
     centers.view_host()(0) = MidpointCell(box, grid);
   } else {
     for (int z=0, c=0; z<side; ++z) {
@@ -73,6 +81,8 @@ void WriteProfile(const std::string &label, const RadialProfile &profile,
   out << "# bin_width num_bins requested_rmax final_edge ncenter\n"
       << profile.bin_width << ' ' << profile.num_bins << ' ' << requested_rmax << ' '
       << (profile.num_bins-0.5)*profile.bin_width << ' ' << centers.extent(0) << '\n';
+  out << "# nbins_subcell nsub\n" << "# " << profile.nbins_subcell << ' '
+      << profile.nsub << '\n';
   for (std::size_t c=0; c<centers.extent(0); ++c) {
     const auto &center = host_centers(c);
     out << "# center " << center.id << ' ' << center.x1 << ' ' << center.x2
@@ -229,7 +239,9 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
     }
   }
   Kokkos::fence();
-  RadialProfile profile(pm, requested);
+  RadialProfile profile(pm, requested,
+      pin->GetOrAddInteger("problem", "nbins_subcell", 4),
+      pin->GetOrAddInteger("problem", "nsub", 4));
   Kokkos::fence();
   profile.measure_time = performance &&
       pin->GetOrAddBoolean("problem", "phase_timings", false);
@@ -340,6 +352,7 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
 }  // namespace
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+  subcell_fixture = pin->GetOrAddBoolean("problem", "subcell_fixture", false);
   center_count = pin->GetOrAddInteger("problem", "center_count", 1);
   if (center_count != 1 && center_count != 8 && center_count != 64) {
     Kokkos::abort("center_count must be 1, 8 or 64");
