@@ -82,12 +82,14 @@ DvceArray3D<Real> RadialProfile::Compute(
   }
 
   // Capture variables
-  DvceArray5D<Real> u0;
+  DvceArray5D<Real> u0, w0;
   auto *pack = mesh_->pmb_pack;
   if (pack->phydro != nullptr) {
     u0 = pack->phydro->u0;
+    w0 = pack->phydro->w0;
   } else if (pack->pmhd != nullptr) {
     u0 = pack->pmhd->u0;
+    w0 = pack->pmhd->w0;
   }
   const auto &mesh_size = mesh_->mesh_size;
   const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
@@ -120,6 +122,12 @@ DvceArray3D<Real> RadialProfile::Compute(
       auto sum = scatter.access();
       sum(c, shell_volume, bin) += dvol;
       sum(c, shell_mass, bin) += u0(m, IDN, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_x, bin) += w0(m, IVX, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_y, bin) += w0(m, IVY, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_z, bin) += w0(m, IVZ, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
+      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k+indcs.ks, j+indcs.js, i+indcs.is)*dvol;
       // TODO Add more fields...
     }
   });
@@ -143,7 +151,14 @@ DvceArray3D<Real> RadialProfile::Compute(
         0, static_cast<int>(ncenter)-1, 0, nbins-1,
         KOKKOS_LAMBDA(int c, int bin) {
       const Real vshell = rprof(c, shell_volume, bin);
+      const Real mshell = rprof(c, shell_mass, bin);
       rprof(c, density, bin) = rprof(c, shell_mass, bin)/vshell;
+      rprof(c, velocity_x, bin) = rprof(c, velocity_x, bin)/vshell;
+      rprof(c, velocity_y, bin) = rprof(c, velocity_y, bin)/vshell;
+      rprof(c, velocity_z, bin) = rprof(c, velocity_z, bin)/vshell;
+      rprof(c, velocity_mass_weighted_x, bin) = rprof(c, velocity_mass_weighted_x, bin)/mshell;
+      rprof(c, velocity_mass_weighted_y, bin) = rprof(c, velocity_mass_weighted_y, bin)/mshell;
+      rprof(c, velocity_mass_weighted_z, bin) = rprof(c, velocity_mass_weighted_z, bin)/mshell;
       // TODO Add more fields...
     });
   }
