@@ -30,6 +30,9 @@ rsolver = advect
 iso_sound_speed = 1.0
 <problem>
 varying = true
+varying_velocity = false
+accuracy_only = false
+phase_timings = false
 performance = false
 rmax = 2.0
 repeats = 20
