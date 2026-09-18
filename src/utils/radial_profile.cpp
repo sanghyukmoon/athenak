@@ -51,6 +51,16 @@ KOKKOS_INLINE_FUNCTION
 int BinIndex(Real r, Real dr) {
   return static_cast<int>(std::floor(r/dr + 0.5));
 }
+
+KOKKOS_INLINE_FUNCTION
+void CartesianToSpherical(Real vx, Real vy, Real vz,
+		Real cos_th, Real sin_th, Real cos_ph, Real sin_ph,
+    Real &vr, Real &vtheta, Real &vphi) {
+  const Real v_cyl = vx*cos_ph + vy*sin_ph;
+  vr     = v_cyl*sin_th + vz*cos_th;
+  vtheta = v_cyl*cos_th - vz*sin_th;
+  vphi   = -vx*sin_ph + vy*cos_ph;
+}
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
@@ -60,11 +70,10 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
       num_bins_subcell(corrected_bins),
       nsub(num_subcells),
       mesh_(mesh) {
-  if (num_bins_subcell < 0) Fail("num_bins_subcell must be nonnegative");
+  if (nsub % 2 != 0) Fail("nsub must be even to avoid singularity at the center");
+  if (num_bins_subcell < 1) Fail("At least one subcell bin is needed to avoid singularity");
   if (nsub < 1) Fail("nsub must be positive");
-  if (num_bins_subcell > num_bins) {
-    Fail("num_bins_subcell must be <= num_bins");
-  }
+  if (num_bins_subcell > num_bins) Fail("num_bins_subcell must be <= num_bins");
 }
 
 
@@ -180,19 +189,57 @@ DvceArray3D<Real> RadialProfile::Compute(
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
-    const int bin = BinIndex(sqrt(x*x+y*y+z*z), dr);
+    const Real rsph = sqrt(x*x+y*y+z*z);
+    const int bin = BinIndex(rsph, dr);
     const bool is_valid_bin = is_subcell ? bin < nbins_sub
                                   : nbins_sub <= bin && bin < nbins;
     if (is_valid_bin) {
+      // even number of subcell avoids central singularity: rsph > 0 is guaranteed.
+      const Real rcyl = sqrt(x*x+y*y);
+      const Real cos_th = z/rsph;
+      const Real sin_th = rcyl/rsph;
+      const Real cos_ph = rcyl > 0.0 ? x/rcyl : 1.0;
+      const Real sin_ph = rcyl > 0.0 ? y/rcyl : 0.0;
+
+      const Real vx = w0(m, IVX, k, j, i);
+      const Real vy = w0(m, IVY, k, j, i);
+      const Real vz = w0(m, IVZ, k, j, i);
+			Real v1, v2, v3;
+		  CartesianToSpherical(vx, vy, vz, cos_th, sin_th, cos_ph, sin_ph, v1, v2, v3);
+      const Real px = u0(m, IM1, k, j, i);
+      const Real py = u0(m, IM2, k, j, i);
+      const Real pz = u0(m, IM3, k, j, i);
+      Real p1, p2, p3;
+      CartesianToSpherical(px, py, pz, cos_th, sin_th, cos_ph, sin_ph, p1, p2, p3);
+
       auto sum = scatter.access();
       sum(c, shell_volume, bin) += 1.0;
       sum(c, shell_mass, bin) += u0(m, IDN, k, j, i);
-      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i);
-      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i);
-      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i);
-      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i);
-      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i);
-      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i);
+      sum(c, velocity_x, bin) += vx;
+      sum(c, velocity_y, bin) += vy;
+      sum(c, velocity_z, bin) += vz;
+      sum(c, velocity_mass_weighted_x, bin) += px;
+      sum(c, velocity_mass_weighted_y, bin) += py;
+      sum(c, velocity_mass_weighted_z, bin) += pz;
+      sum(c, velocity_x_sq, bin) += vx*vx;
+      sum(c, velocity_y_sq, bin) += vy*vy;
+      sum(c, velocity_z_sq, bin) += vz*vz;
+      sum(c, velocity_mass_weighted_x_sq, bin) += px*vx;
+      sum(c, velocity_mass_weighted_y_sq, bin) += py*vy;
+      sum(c, velocity_mass_weighted_z_sq, bin) += pz*vz;
+      sum(c, velocity_1, bin) += v1;
+      sum(c, velocity_2, bin) += v2;
+      sum(c, velocity_3, bin) += v3;
+      sum(c, velocity_mass_weighted_1, bin) += p1;
+      sum(c, velocity_mass_weighted_2, bin) += p2;
+      sum(c, velocity_mass_weighted_3, bin) += p3;
+      sum(c, velocity_1_sq, bin) += v1*v1;
+      sum(c, velocity_2_sq, bin) += v2*v2;
+      sum(c, velocity_3_sq, bin) += v3*v3;
+      sum(c, velocity_mass_weighted_1_sq, bin) += p1*v1;
+      sum(c, velocity_mass_weighted_2_sq, bin) += p2*v2;
+      sum(c, velocity_mass_weighted_3_sq, bin) += p3*v3;
+
       // TODO Add more fields...
     }
     return bin;
@@ -250,12 +297,34 @@ DvceArray3D<Real> RadialProfile::Compute(
       rprof(c, shell_volume, bin) = sample_count*volume_element;
       rprof(c, shell_mass, bin) = density_sum*volume_element;
       rprof(c, density, bin) = density_sum/sample_count;
-      rprof(c, velocity_x, bin) = rprof(c, velocity_x, bin)/sample_count;
-      rprof(c, velocity_y, bin) = rprof(c, velocity_y, bin)/sample_count;
-      rprof(c, velocity_z, bin) = rprof(c, velocity_z, bin)/sample_count;
-      rprof(c, velocity_mass_weighted_x, bin) = rprof(c, velocity_mass_weighted_x, bin)/density_sum;
-      rprof(c, velocity_mass_weighted_y, bin) = rprof(c, velocity_mass_weighted_y, bin)/density_sum;
-      rprof(c, velocity_mass_weighted_z, bin) = rprof(c, velocity_mass_weighted_z, bin)/density_sum;
+
+      constexpr Field volume_weighted_fields[] = {
+        velocity_x, velocity_y, velocity_z,
+        velocity_x_sq, velocity_y_sq, velocity_z_sq,
+        velocity_1, velocity_2, velocity_3,
+        velocity_1_sq, velocity_2_sq, velocity_3_sq
+      };
+      constexpr Field mass_weighted_fields[] = {
+        velocity_mass_weighted_x,
+        velocity_mass_weighted_y,
+        velocity_mass_weighted_z,
+        velocity_mass_weighted_x_sq,
+        velocity_mass_weighted_y_sq,
+        velocity_mass_weighted_z_sq,
+        velocity_mass_weighted_1,
+        velocity_mass_weighted_2,
+        velocity_mass_weighted_3,
+        velocity_mass_weighted_1_sq,
+        velocity_mass_weighted_2_sq,
+        velocity_mass_weighted_3_sq
+      };
+      for (Field f : volume_weighted_fields) {
+        rprof(c, f, bin) /= sample_count;
+      }
+      for (Field f : mass_weighted_fields) {
+        rprof(c, f, bin) /= density_sum;
+      }
+
       // TODO Add more fields...
     });
   }
