@@ -13,8 +13,6 @@ struct RadialProfileCenter {
   Real x1, x2, x3;
 };
 
-// Providers return a managed device view with all center writes completed.
-using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 
 // Radial shell averages on uniform, cubic-cell, periodic Cartesian meshes.
 // The caller supplies identical ordered centers on every MPI rank. Only rank 0's
@@ -22,6 +20,17 @@ using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 // their data and remain valid across subsequent Compute calls.
 // Centers must be ready before Compute and unchanged until it returns. Their view
 // extent is the active count; the calculator neither modifies nor retains them.
+//
+// To avoid coordinate singularity, the central cell is subdivided into nsub^3 subcells,
+// where nsub is even. If the radial profile center is at the cell center, no subcell
+// center will coincide with the singularity. If the radial profile center is not at the
+// cell center, the radial profile calculation may encounter the singularity.
+//
+// Along the z axis, the azimuth angle is undefined; we may choose to perform similar
+// subcell correction there; for now, we take arbitrary phi=0 convention at z axis.
+// Beyond the subcell correction region, the contribution of this on-axis cell will be
+// small.
+
 class RadialProfile {
  public:
    // TODO is it possible to get length of enum, instead of assigning nfield here?
@@ -35,7 +44,25 @@ class RadialProfile {
     velocity_mass_weighted_x = 6,
     velocity_mass_weighted_y = 7,
     velocity_mass_weighted_z = 8,
-    nfields = 9
+    velocity_x_sq = 9,
+    velocity_y_sq = 10,
+    velocity_z_sq = 11,
+    velocity_mass_weighted_x_sq = 12,
+    velocity_mass_weighted_y_sq = 13,
+    velocity_mass_weighted_z_sq = 14,
+    velocity_1 = 15,
+    velocity_2 = 16,
+    velocity_3 = 17,
+    velocity_mass_weighted_1 = 18,
+    velocity_mass_weighted_2 = 19,
+    velocity_mass_weighted_3 = 20,
+    velocity_1_sq = 21,
+    velocity_2_sq = 22,
+    velocity_3_sq = 23,
+    velocity_mass_weighted_1_sq = 24,
+    velocity_mass_weighted_2_sq = 25,
+    velocity_mass_weighted_3_sq = 26,
+    nfields = 27
   };
   RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
