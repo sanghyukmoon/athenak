@@ -71,6 +71,33 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
 //----------------------------------------------------------------------------------------
 // \!fn void RadialProfile::Compute()
 // \brief
+//
+// The volume-weighted shell-average of a quantity Q is computed as
+// <Q>_bin = sum_{ijk \in bin} Q_{ijk}*dV_{ijk} / sum_{ijk \in bin} dV_{ijk}
+//         = sum_{ijk \in bin} Q_{ijk} / sum_{ijk \in bin} 1.0
+//
+// The mass-weighted shell-average of a quantity Q is computed as
+// <Q>_bin,mw = sum_{ijk \in bin} Q_{ijk}*\rho_{ijk} / sum_{ijk \in bin} \rho_{ijk}
+//
+// Hence, no need to multiply cell volume here. In the normalization step, we
+// simply divide each bin by "sample count" and "density sum", respectively.
+// Note that the "sample count" and "density sum" are simply the shell_volume and
+// shell_mass before the normalization step.
+//
+// Because dV_{ijk} cancels, we need not worry about the different between the
+// parent cell volume and the subcell volume. The only exceptions are the actual
+// shell volume and shell mass, because
+//     shell_volume = sum_{ijk \in bin} dV_{ijk}
+//     shell_mass   = sum_{ijk \in bin} \rho_{ijk}*dV_{ijk}
+// However, because
+//     dV_{ijk} = dvol             bin >= nbins_sub
+//              = dvol_subcell     bin < nbins_sub
+// is constant within a given bin, the dV_{ijk} factor can be factored out such that
+//     shell_volume = sample_count * volume_element
+//     shell_mass   = density_sum * volume_element,
+// where
+//     volume_element = dvol             bin >= nbins_sub
+//                    = dvol_subcell     bin < nbins_sub
 
 DvceArray3D<Real> RadialProfile::Compute(
     const DvceArray1D<const RadialProfileCenter>& centers) {
@@ -157,23 +184,24 @@ DvceArray3D<Real> RadialProfile::Compute(
     const bool is_valid_bin = is_subcell ? bin < nbins_sub
                                   : nbins_sub <= bin && bin < nbins;
     if (is_valid_bin) {
-      const Real volume = is_subcell ? dvol_subcell : dvol;
       auto sum = scatter.access();
-      sum(c, shell_volume, bin) += volume;
-      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i)*volume;
-      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i)*volume;
-      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i)*volume;
-      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i)*volume;
-      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i)*volume;
-      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i)*volume;
-      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i)*volume;
+      sum(c, shell_volume, bin) += 1.0;
+      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i);
+      sum(c, velocity_x, bin) += w0(m, IVX, k, j, i);
+      sum(c, velocity_y, bin) += w0(m, IVY, k, j, i);
+      sum(c, velocity_z, bin) += w0(m, IVZ, k, j, i);
+      sum(c, velocity_mass_weighted_x, bin) += u0(m, IM1, k, j, i);
+      sum(c, velocity_mass_weighted_y, bin) += u0(m, IM2, k, j, i);
+      sum(c, velocity_mass_weighted_z, bin) += u0(m, IM3, k, j, i);
       // TODO Add more fields...
     }
     return bin;
   };
   // END_KOKKOS_LAMBDA
 
-  // Now, perform the actual calculation
+  // =======================================================
+  // Step 1. Perform the radial binning
+  // =======================================================
   par_for<std::int64_t>("radial_binning", DevExeSpace(),
       0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
       indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
@@ -209,20 +237,25 @@ DvceArray3D<Real> RadialProfile::Compute(
 #endif
   phase(timings.reduction);
 
-  // Normalize radial profiles
+  // =======================================================
+  // Step 2. Normalize the radial profiles
+  // =======================================================
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
         0, static_cast<int>(ncenter)-1, 0, nbins-1,
         KOKKOS_LAMBDA(int c, int bin) {
-      const Real vshell = rprof(c, shell_volume, bin);
-      const Real mshell = rprof(c, shell_mass, bin);
-      rprof(c, density, bin) = rprof(c, shell_mass, bin)/vshell;
-      rprof(c, velocity_x, bin) = rprof(c, velocity_x, bin)/vshell;
-      rprof(c, velocity_y, bin) = rprof(c, velocity_y, bin)/vshell;
-      rprof(c, velocity_z, bin) = rprof(c, velocity_z, bin)/vshell;
-      rprof(c, velocity_mass_weighted_x, bin) = rprof(c, velocity_mass_weighted_x, bin)/mshell;
-      rprof(c, velocity_mass_weighted_y, bin) = rprof(c, velocity_mass_weighted_y, bin)/mshell;
-      rprof(c, velocity_mass_weighted_z, bin) = rprof(c, velocity_mass_weighted_z, bin)/mshell;
+      const Real volume_element = bin < nbins_sub ? dvol_subcell : dvol;
+      const Real sample_count = rprof(c, shell_volume, bin);
+      const Real density_sum = rprof(c, shell_mass, bin);
+      rprof(c, shell_volume, bin) = sample_count*volume_element;
+      rprof(c, shell_mass, bin) = density_sum*volume_element;
+      rprof(c, density, bin) = density_sum/sample_count;
+      rprof(c, velocity_x, bin) = rprof(c, velocity_x, bin)/sample_count;
+      rprof(c, velocity_y, bin) = rprof(c, velocity_y, bin)/sample_count;
+      rprof(c, velocity_z, bin) = rprof(c, velocity_z, bin)/sample_count;
+      rprof(c, velocity_mass_weighted_x, bin) = rprof(c, velocity_mass_weighted_x, bin)/density_sum;
+      rprof(c, velocity_mass_weighted_y, bin) = rprof(c, velocity_mass_weighted_y, bin)/density_sum;
+      rprof(c, velocity_mass_weighted_z, bin) = rprof(c, velocity_mass_weighted_z, bin)/density_sum;
       // TODO Add more fields...
     });
   }
