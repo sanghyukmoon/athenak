@@ -1,5 +1,4 @@
 // Analytic static/dynamic fixture. Diagnostic text is for tests, not a persistent rprof format.
-#include <sys/resource.h>
 #include <sched.h>
 #include <unistd.h>
 
@@ -9,7 +8,6 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
-#include <vector>
 #include <type_traits>
 
 #include "athena.hpp"
@@ -21,8 +19,10 @@
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 #include "utils/radial_profile.hpp"
-#include "utils/benchmark_timer.hpp"
 #include "bvals/bvals.hpp"
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+#endif
 
 namespace {
 int center_count = 1;
@@ -247,27 +247,50 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
       pin->GetOrAddBoolean("problem", "phase_timings", false);
   DvceArray3D<Real> rprof;
   if (performance) {
-    BenchmarkTimer timer(pin->GetOrAddInteger("problem", "repeats", 20),
-                         pin->GetOrAddReal("problem", "warmup_seconds", 0.0));
-    std::vector<RadialProfile::Timings> phases;
-    while (!timer.Done()) {
-      rprof = {};  // release previous result before fences, barrier and timer
-      timer.Start();
-      rprof = profile.Compute(centers);
-      timer.Stop();  // includes Compute return and local ScatterView destruction
-      phases.push_back(profile.timings);
-    }
-    timer.Write("profile_timings", rprof.size()*sizeof(Real));
+    const int repeats = pin->GetOrAddInteger("problem", "repeats", 20);
+    const double warmup_seconds = pin->GetOrAddReal("problem", "warmup_seconds", 0.0);
+    if (repeats < 1 || warmup_seconds < 0) Kokkos::abort("invalid benchmark sampling");
+    const auto rank = std::to_string(global_variable::my_rank);
+    std::ofstream total("profile_timings_rank"+rank+".csv");
+    total << std::setprecision(17) << "sample,kind,wall_total\n";
+    std::ofstream phases;
     if (profile.measure_time) {
-      std::ofstream out("phases_rank"+std::to_string(global_variable::my_rank)+".csv");
-      out << std::setprecision(17)
-          << "sample,allocation,accumulation,reduction,normalization,total\n";
-      for (std::size_t i=0; i<phases.size(); ++i) {
-        const auto &t = phases[i];
-        out << i << ',' << t.allocation << ',' << t.accumulation << ','
-            << t.reduction << ',' << t.normalization << ',' << t.total << '\n';
+      phases.open("phases_rank"+rank+".csv");
+      phases << std::setprecision(17)
+             << "sample,allocation,accumulation,reduction,normalization,total\n";
+    }
+
+    Kokkos::Timer timer;
+    int sample = 0, measured = 0;
+    double warmup_elapsed = 0;
+    while (measured < repeats) {
+      rprof = {};  // release previous result before fences, barrier and timer
+      Kokkos::fence();
+#if MPI_PARALLEL_ENABLED
+      MPI_Barrier(MPI_COMM_WORLD);
+#endif
+      timer.reset();
+      rprof = profile.Compute(centers);
+      Kokkos::fence();
+      const double elapsed = timer.seconds();  // includes local object destruction
+      double global_elapsed = elapsed;
+#if MPI_PARALLEL_ENABLED
+      MPI_Allreduce(&elapsed, &global_elapsed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+#endif
+      const std::string kind = sample == 0 ? "first" :
+          (warmup_elapsed < warmup_seconds ? "warmup" : "measured");
+      if (kind == "warmup") warmup_elapsed += global_elapsed;
+      if (kind == "measured") ++measured;
+      total << sample << ',' << kind << ',' << elapsed << '\n';
+      if (profile.measure_time) {
+        const auto &t = profile.timings;
+        phases << sample << ',' << t.allocation << ',' << t.accumulation << ','
+               << t.reduction << ',' << t.normalization << ',' << t.total << '\n';
       }
-      if (!out) Kokkos::abort("cannot write profile phases");
+      ++sample;
+    }
+    if (!total || (profile.measure_time && !phases)) {
+      Kokkos::abort("cannot write profile timings");
     }
     return;
   }
