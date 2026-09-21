@@ -12,8 +12,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string> // string
-#include <memory>
-#include "utils/benchmark_timer.hpp"
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -533,12 +531,6 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
     std::cout << "\nSetup complete, executing task list(s)...\n" << std::endl;
   }
 
-  std::unique_ptr<BenchmarkTimer> benchmark;
-  if (pin->GetOrAddBoolean("time", "benchmark_timesteps", false)) {
-    benchmark = std::make_unique<BenchmarkTimer>(
-        pin->GetOrAddInteger("time", "benchmark_repeats", 20),
-        pin->GetOrAddReal("time", "benchmark_warmup", 5.0));
-  }
   if (time_evolution == TimeEvolution::tstatic) {
     std::cout << "\nStatic time evolution selected, solving steady-state problem...\n"
               << std::endl;
@@ -552,8 +544,6 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
            (elapsed_time < wall_time)) {
       if (global_variable::my_rank == 0) {OutputCycleDiagnostics(pmesh);}
       if (wdflag) {WatchDog(0);}
-
-      if (benchmark) benchmark->Start();
 
       if (sts.enabled) {
         BeginSTSSweep(pmesh, STSSweep::pre);
@@ -636,10 +626,6 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
       // compute new timestep AFTER all Meshblocks refined/derefined
       pmesh->NewTimeStep(tlim);
       RefreshSTSCycleState(pmesh);
-      if (benchmark) {
-        benchmark->Stop();
-        if (benchmark->Done()) break;
-      }
 
       // Update wall clock time if needed.
       if (wall_time > 0.) {
@@ -647,10 +633,6 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
       }
     }  // end while
   }    // end of (time_evolution != tstatic) clause
-  if (benchmark) {
-    if (!benchmark->Done()) Kokkos::abort("incomplete timestep benchmark");
-    benchmark->Write("mhd_timings");
-  }
   return;
 }
 
