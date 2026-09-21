@@ -64,9 +64,14 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   MPI_Reduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
              MPI_MAX, 0, MPI_COMM_WORLD);
   #endif
+  std::uint64_t zonecycles = static_cast<uint64_t>(pm->nmb_total) * num_centers *
+                             pm->NumberOfMeshBlockCells();
+  double zcps = static_cast<double>(zonecycles) / max_elapsed;
+
   if (global_variable::my_rank == 0) {
-    std::cout << "RadialProfile calculation takes " << max_elapsed/num_centers
-              << " seconds per center" << std::endl;
+    std::cout << "RadialProfile performance... " << std::endl;
+    std::cout << "cpu time used  = " << max_elapsed << std::endl;
+    std::cout << "zone-cycles/cpu_second = " << zcps << std::endl;
     const auto &t = radial_profile.timings;
     std::cout << "Rank 0 timings (seconds per center): allocation=" << t.allocation/num_centers
               << " accumulation=" << t.accumulation/num_centers
