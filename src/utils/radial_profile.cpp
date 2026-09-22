@@ -13,6 +13,7 @@
 #include "hydro/hydro.hpp"
 #include "mesh/mesh.hpp"
 #include "mhd/mhd.hpp"
+#include "Kokkos_ScatterView.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -34,13 +35,6 @@ namespace {
 struct SubcellParent {
   int c, m, k, j, i;
 };
-
-int CheckedProduct(int left, int right) {
-  if (left > std::numeric_limits<int>::max()/right) {
-    Fail("subcell list or iteration count exceeds int range");
-  }
-  return left*right;
-}
 
 // Consider:
 // -----------------------------------------------------
@@ -230,7 +224,6 @@ DvceArray3D<Real> RadialProfile::Compute(
       const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx1 && std::abs(y) < 0.5*dx2;
       const int nquad = on_axis ? nsubcells : 1;
       Real v_sph[3] = {}, v_sph_sq[3] = {};
-      Real p_sph[3] = {}, pv_sph[3] = {};
       Real inward_mass_flux = 0.0, outward_mass_flux = 0.0;
       Real g1 = 0.0, neg_gr_flag = 0.0;
       Real b_sph[3] = {}, b_sph_sq[3] = {};
@@ -249,11 +242,9 @@ DvceArray3D<Real> RadialProfile::Compute(
             const Real sin_th = rcyl/rsph;
             const Real cos_ph = xq/rcyl;
             const Real sin_ph = yq/rcyl;
-            Real v[3], p[3];
+            Real v[3];
             CartesianToSpherical(vx, vy, vz, cos_th, sin_th, cos_ph, sin_ph,
                                  v[0], v[1], v[2]);
-            CartesianToSpherical(px, py, pz, cos_th, sin_th, cos_ph, sin_ph,
-                                 p[0], p[1], p[2]);
             inward_mass_flux += rho*Kokkos::fmax(-v[0], 0.0);
             outward_mass_flux += rho*Kokkos::fmax(v[0], 0.0);
             if (mhd) {
@@ -273,8 +264,6 @@ DvceArray3D<Real> RadialProfile::Compute(
             for (int ax = 0; ax < 3; ++ax) {
               v_sph[ax] += v[ax];
               v_sph_sq[ax] += v[ax]*v[ax];
-              p_sph[ax] += p[ax];
-              pv_sph[ax] += p[ax]*v[ax];
             }
           }
         }
@@ -290,8 +279,6 @@ DvceArray3D<Real> RadialProfile::Compute(
           b_sph_sq[ax] /= samples;
           v_sph[ax] /= samples;
           v_sph_sq[ax] /= samples;
-          p_sph[ax] /= samples;
-          pv_sph[ax] /= samples;
         }
       }
       // Add fields to the bin
@@ -324,15 +311,15 @@ DvceArray3D<Real> RadialProfile::Compute(
       sum(c, velocity_1, bin) += v_sph[0];
       sum(c, velocity_2, bin) += v_sph[1];
       sum(c, velocity_3, bin) += v_sph[2];
-      sum(c, velocity_mass_weighted_1, bin) += p_sph[0];
-      sum(c, velocity_mass_weighted_2, bin) += p_sph[1];
-      sum(c, velocity_mass_weighted_3, bin) += p_sph[2];
+      sum(c, velocity_mass_weighted_1, bin) += rho*v_sph[0];
+      sum(c, velocity_mass_weighted_2, bin) += rho*v_sph[1];
+      sum(c, velocity_mass_weighted_3, bin) += rho*v_sph[2];
       sum(c, velocity_1_sq, bin) += v_sph_sq[0];
       sum(c, velocity_2_sq, bin) += v_sph_sq[1];
       sum(c, velocity_3_sq, bin) += v_sph_sq[2];
-      sum(c, velocity_mass_weighted_1_sq, bin) += pv_sph[0];
-      sum(c, velocity_mass_weighted_2_sq, bin) += pv_sph[1];
-      sum(c, velocity_mass_weighted_3_sq, bin) += pv_sph[2];
+      sum(c, velocity_mass_weighted_1_sq, bin) += rho*v_sph_sq[0];
+      sum(c, velocity_mass_weighted_2_sq, bin) += rho*v_sph_sq[1];
+      sum(c, velocity_mass_weighted_3_sq, bin) += rho*v_sph_sq[2];
       sum(c, mass_flux_in, bin) += inward_mass_flux;
       sum(c, mass_flux_out, bin) += outward_mass_flux;
       if (mhd) {
