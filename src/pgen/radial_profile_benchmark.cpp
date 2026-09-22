@@ -35,7 +35,8 @@ DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm) {
     i + indcs.nx1*(j + indcs.nx2*k),
     CellCenterX(i, indcs.nx1, size.x1min, size.x1max),
     CellCenterX(j, indcs.nx2, size.x2min, size.x2max),
-    CellCenterX(k, indcs.nx3, size.x3min, size.x3max)
+    CellCenterX(k, indcs.nx3, size.x3min, size.x3max),
+    0.0, 0.0, 0.0  // stationary uniform benchmark
   };
   Kokkos::deep_copy(centers, center);
   return centers;

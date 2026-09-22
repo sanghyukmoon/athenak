@@ -9,6 +9,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "globals.hpp"
+#include "gravity/gravity.hpp"
 #include "hydro/hydro.hpp"
 #include "mesh/mesh.hpp"
 #include "mhd/mhd.hpp"
@@ -144,15 +145,21 @@ DvceArray3D<Real> RadialProfile::Compute(
   }
 
   // Capture variables
-  DvceArray5D<Real> u0, w0;
-  auto *pack = mesh_->pmb_pack;
-  if (pack->phydro != nullptr) {
-    u0 = pack->phydro->u0;
-    w0 = pack->phydro->w0;
-  } else if (pack->pmhd != nullptr) {
+  DvceArray5D<Real> u0, w0, bcc0, phi;
+  const auto *pack = mesh_->pmb_pack;
+  const bool mhd = pack->pmhd != nullptr;
+  const bool gravity = pack->pgrav != nullptr;
+  if (mhd) {
     u0 = pack->pmhd->u0;
     w0 = pack->pmhd->w0;
+    bcc0 = pack->pmhd->bcc0;
+  } else if (pack->phydro != nullptr) {
+    u0 = pack->phydro->u0;
+    w0 = pack->phydro->w0;
+  } else {
+    Fail("Radial profile requires either hydro or MHD turned on");
   }
+  if (gravity) phi = pack->pgrav->phi;
   const auto &mesh_size = mesh_->mesh_size;
   const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
   const Real lx1 = mesh_size.x1max - mesh_size.x1min;
@@ -195,20 +202,38 @@ DvceArray3D<Real> RadialProfile::Compute(
     const bool is_valid_bin = is_subcell ? bin < nbins_sub
                                   : nbins_sub <= bin && bin < nbins;
     if (is_valid_bin) {
-      const Real vx = w0(m, IVX, k, j, i);
-      const Real vy = w0(m, IVY, k, j, i);
-      const Real vz = w0(m, IVZ, k, j, i);
-      const Real px = u0(m, IM1, k, j, i);
-      const Real py = u0(m, IM2, k, j, i);
-      const Real pz = u0(m, IM3, k, j, i);
+      // Prepare fields
+      const Real rho = u0(m, IDN, k, j, i);
+      const Real vx = w0(m, IVX, k, j, i) - center.vx;
+      const Real vy = w0(m, IVY, k, j, i) - center.vy;
+      const Real vz = w0(m, IVZ, k, j, i) - center.vz;
+      const Real px = rho*vx;
+      const Real py = rho*vy;
+      const Real pz = rho*vz;
+      Real phi_c, gx, gy, gz;
+      if (gravity) {
+        phi_c = phi(m, 0, k, j, i);
+        gx = -(phi(m, 0, k, j, i+1) - phi(m, 0, k, j, i-1))/(2.0*dx1);
+        gy = -(phi(m, 0, k, j+1, i) - phi(m, 0, k, j-1, i))/(2.0*dx2);
+        gz = -(phi(m, 0, k+1, j, i) - phi(m, 0, k-1, j, i))/(2.0*dx3);
+      }
+      Real bx, by, bz;
+      if (mhd) {
+        bx = bcc0(m, IBX, k, j, i);
+        by = bcc0(m, IBY, k, j, i);
+        bz = bcc0(m, IBZ, k, j, i);
+      }
 
-      // Cartesian-to-spherical transformation for vector quantities
+      // Prepare fields involving spherical vector components
       // The basis vectors \hat{\theta} and \hat{\phi} are undefined at R=0; for those
-      // cells, we subdivide the parent cell into nquad^3 subcells, and average the
+      // cells, average sample projections and nonlinear moments before scattering.
       const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx1 && std::abs(y) < 0.5*dx2;
       const int nquad = on_axis ? nsubcells : 1;
       Real v_sph[3] = {}, v_sph_sq[3] = {};
       Real p_sph[3] = {}, pv_sph[3] = {};
+      Real inward_mass_flux = 0.0, outward_mass_flux = 0.0;
+      Real g1 = 0.0, neg_gr_flag = 0.0;
+      Real b_sph[3] = {}, b_sph_sq[3] = {};
       for (int kk = 0; kk < nquad; ++kk) {
         for (int jj = 0; jj < nquad; ++jj) {
           for (int ii = 0; ii < nquad; ++ii) {
@@ -217,9 +242,6 @@ DvceArray3D<Real> RadialProfile::Compute(
               xq += ((ii+0.5)/nquad-0.5)*dx1;
               yq += ((jj+0.5)/nquad-0.5)*dx2;
               zq += ((kk+0.5)/nquad-0.5)*dx3;
-              xq -= lx1*round(xq/lx1);
-              yq -= lx2*round(yq/lx2);
-              zq -= lx3*round(zq/lx3);
             }
             rsph = sqrt(xq*xq+yq*yq+zq*zq);
             const Real rcyl = sqrt(xq*xq+yq*yq);
@@ -232,58 +254,110 @@ DvceArray3D<Real> RadialProfile::Compute(
                                  v[0], v[1], v[2]);
             CartesianToSpherical(px, py, pz, cos_th, sin_th, cos_ph, sin_ph,
                                  p[0], p[1], p[2]);
-            for (int a = 0; a < 3; ++a) {
-              v_sph[a] += v[a];
-              v_sph_sq[a] += v[a]*v[a];
-              p_sph[a] += p[a];
-              pv_sph[a] += p[a]*v[a];
+            inward_mass_flux += rho*Kokkos::fmax(-v[0], 0.0);
+            outward_mass_flux += rho*Kokkos::fmax(v[0], 0.0);
+            if (mhd) {
+              Real b[3];
+              CartesianToSpherical(bx, by, bz, cos_th, sin_th, cos_ph, sin_ph,
+                                   b[0], b[1], b[2]);
+              for (int ax = 0; ax < 3; ++ax) {
+                b_sph[ax] += b[ax];
+                b_sph_sq[ax] += b[ax]*b[ax];
+              }
+            }
+            if (gravity) {
+              const Real gr = (gx*xq + gy*yq + gz*zq)/rsph;
+              g1 += gr;
+              neg_gr_flag += gr < 0.0 ? 1.0 : 0.0;
+            }
+            for (int ax = 0; ax < 3; ++ax) {
+              v_sph[ax] += v[ax];
+              v_sph_sq[ax] += v[ax]*v[ax];
+              p_sph[ax] += p[ax];
+              pv_sph[ax] += p[ax]*v[ax];
             }
           }
         }
       }
       if (on_axis) {
         const Real samples = static_cast<Real>(nquad)*nquad*nquad;
-        for (int a = 0; a < 3; ++a) {
-          v_sph[a] /= samples;
-          v_sph_sq[a] /= samples;
-          p_sph[a] /= samples;
-          pv_sph[a] /= samples;
+        inward_mass_flux /= samples;
+        outward_mass_flux /= samples;
+        g1 /= samples;
+        neg_gr_flag /= samples;
+        for (int ax = 0; ax < 3; ++ax) {
+          b_sph[ax] /= samples;
+          b_sph_sq[ax] /= samples;
+          v_sph[ax] /= samples;
+          v_sph_sq[ax] /= samples;
+          p_sph[ax] /= samples;
+          pv_sph[ax] /= samples;
         }
       }
-      const Real &v1 = v_sph[0], &v2 = v_sph[1], &v3 = v_sph[2];
-      const Real &v1_sq = v_sph_sq[0], &v2_sq = v_sph_sq[1], &v3_sq = v_sph_sq[2];
-      const Real &p1 = p_sph[0], &p2 = p_sph[1], &p3 = p_sph[2];
-      const Real &pv1 = pv_sph[0], &pv2 = pv_sph[1], &pv3 = pv_sph[2];
-
       // Add fields to the bin
       auto sum = scatter.access();
       sum(c, shell_volume, bin) += 1.0;
-      sum(c, shell_mass, bin) += u0(m, IDN, k, j, i);
+      sum(c, shell_mass, bin) += rho;
+      sum(c, density_sq, bin) += rho*rho;
       sum(c, velocity_x, bin) += vx;
       sum(c, velocity_y, bin) += vy;
       sum(c, velocity_z, bin) += vz;
-      sum(c, velocity_mass_weighted_x, bin) += px;
-      sum(c, velocity_mass_weighted_y, bin) += py;
-      sum(c, velocity_mass_weighted_z, bin) += pz;
+      sum(c, velocity_xy, bin) += vx*vy;
+      sum(c, velocity_xz, bin) += vx*vz;
+      sum(c, velocity_yz, bin) += vy*vz;
       sum(c, velocity_x_sq, bin) += vx*vx;
       sum(c, velocity_y_sq, bin) += vy*vy;
       sum(c, velocity_z_sq, bin) += vz*vz;
+      sum(c, velocity_mass_weighted_x, bin) += px;
+      sum(c, velocity_mass_weighted_y, bin) += py;
+      sum(c, velocity_mass_weighted_z, bin) += pz;
+      sum(c, velocity_mass_weighted_xy, bin) += px*vy;
+      sum(c, velocity_mass_weighted_xz, bin) += px*vz;
+      sum(c, velocity_mass_weighted_yz, bin) += py*vz;
       sum(c, velocity_mass_weighted_x_sq, bin) += px*vx;
       sum(c, velocity_mass_weighted_y_sq, bin) += py*vy;
       sum(c, velocity_mass_weighted_z_sq, bin) += pz*vz;
-      sum(c, velocity_1, bin) += v1;
-      sum(c, velocity_2, bin) += v2;
-      sum(c, velocity_3, bin) += v3;
-      sum(c, velocity_mass_weighted_1, bin) += p1;
-      sum(c, velocity_mass_weighted_2, bin) += p2;
-      sum(c, velocity_mass_weighted_3, bin) += p3;
-      sum(c, velocity_1_sq, bin) += v1_sq;
-      sum(c, velocity_2_sq, bin) += v2_sq;
-      sum(c, velocity_3_sq, bin) += v3_sq;
-      sum(c, velocity_mass_weighted_1_sq, bin) += pv1;
-      sum(c, velocity_mass_weighted_2_sq, bin) += pv2;
-      sum(c, velocity_mass_weighted_3_sq, bin) += pv3;
-      // TODO Add more fields...
+      sum(c, angular_momentum_density_x, bin) += y*pz - z*py;
+      sum(c, angular_momentum_density_y, bin) += z*px - x*pz;
+      sum(c, angular_momentum_density_z, bin) += x*py - y*px;
+      // Spherical components
+      sum(c, velocity_1, bin) += v_sph[0];
+      sum(c, velocity_2, bin) += v_sph[1];
+      sum(c, velocity_3, bin) += v_sph[2];
+      sum(c, velocity_mass_weighted_1, bin) += p_sph[0];
+      sum(c, velocity_mass_weighted_2, bin) += p_sph[1];
+      sum(c, velocity_mass_weighted_3, bin) += p_sph[2];
+      sum(c, velocity_1_sq, bin) += v_sph_sq[0];
+      sum(c, velocity_2_sq, bin) += v_sph_sq[1];
+      sum(c, velocity_3_sq, bin) += v_sph_sq[2];
+      sum(c, velocity_mass_weighted_1_sq, bin) += pv_sph[0];
+      sum(c, velocity_mass_weighted_2_sq, bin) += pv_sph[1];
+      sum(c, velocity_mass_weighted_3_sq, bin) += pv_sph[2];
+      sum(c, mass_flux_in, bin) += inward_mass_flux;
+      sum(c, mass_flux_out, bin) += outward_mass_flux;
+      if (mhd) {
+        sum(c, bfield_x, bin) += bx;
+        sum(c, bfield_y, bin) += by;
+        sum(c, bfield_z, bin) += bz;
+        sum(c, bfield_x_sq, bin) += bx*bx;
+        sum(c, bfield_y_sq, bin) += by*by;
+        sum(c, bfield_z_sq, bin) += bz*bz;
+        sum(c, bfield_1, bin) += b_sph[0];
+        sum(c, bfield_2, bin) += b_sph[1];
+        sum(c, bfield_3, bin) += b_sph[2];
+        sum(c, bfield_1_sq, bin) += b_sph_sq[0];
+        sum(c, bfield_2_sq, bin) += b_sph_sq[1];
+        sum(c, bfield_3_sq, bin) += b_sph_sq[2];
+      }
+      if (gravity) {
+        sum(c, potential_mass_weighted, bin) += rho*phi_c;
+        sum(c, gravity_1, bin) += g1;
+        sum(c, gravity_mass_weighted_1, bin) += rho*g1;
+        sum(c, fraction_negative_gravity_1, bin) += neg_gr_flag;
+        sum(c, rhoxgx, bin) += rho*x*gx;
+        sum(c, rhoygy, bin) += rho*y*gy;
+        sum(c, rhozgz, bin) += rho*z*gz;
+      }
     }
     return bin;
   };
@@ -337,6 +411,30 @@ DvceArray3D<Real> RadialProfile::Compute(
   // =======================================================
   // Step 2. Normalize the radial profiles
   // =======================================================
+  constexpr Field volume_weighted_fields[] = {
+    density_sq,
+    velocity_x, velocity_y, velocity_z,
+    velocity_xy, velocity_xz, velocity_yz,
+    velocity_x_sq, velocity_y_sq, velocity_z_sq,
+    angular_momentum_density_x, angular_momentum_density_y, angular_momentum_density_z,
+    velocity_1, velocity_2, velocity_3,
+    velocity_1_sq, velocity_2_sq, velocity_3_sq,
+    mass_flux_in, mass_flux_out,
+    bfield_x, bfield_y, bfield_z,
+    bfield_x_sq, bfield_y_sq, bfield_z_sq,
+    bfield_1, bfield_2, bfield_3,
+    bfield_1_sq, bfield_2_sq, bfield_3_sq,
+    gravity_1, fraction_negative_gravity_1
+  };
+  constexpr Field mass_weighted_fields[] = {
+    velocity_mass_weighted_x, velocity_mass_weighted_y, velocity_mass_weighted_z,
+    velocity_mass_weighted_xy, velocity_mass_weighted_xz, velocity_mass_weighted_yz,
+    velocity_mass_weighted_x_sq, velocity_mass_weighted_y_sq, velocity_mass_weighted_z_sq,
+    velocity_mass_weighted_1, velocity_mass_weighted_2, velocity_mass_weighted_3,
+    velocity_mass_weighted_1_sq, velocity_mass_weighted_2_sq, velocity_mass_weighted_3_sq,
+    potential_mass_weighted, gravity_mass_weighted_1,
+    rhoxgx, rhoygy, rhozgz
+  };
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
         0, static_cast<int>(ncenter)-1, 0, nbins-1,
@@ -347,35 +445,12 @@ DvceArray3D<Real> RadialProfile::Compute(
       rprof(c, shell_volume, bin) = sample_count*volume_element;
       rprof(c, shell_mass, bin) = density_sum*volume_element;
       rprof(c, density, bin) = density_sum/sample_count;
-
-      constexpr Field volume_weighted_fields[] = {
-        velocity_x, velocity_y, velocity_z,
-        velocity_x_sq, velocity_y_sq, velocity_z_sq,
-        velocity_1, velocity_2, velocity_3,
-        velocity_1_sq, velocity_2_sq, velocity_3_sq
-      };
-      constexpr Field mass_weighted_fields[] = {
-        velocity_mass_weighted_x,
-        velocity_mass_weighted_y,
-        velocity_mass_weighted_z,
-        velocity_mass_weighted_x_sq,
-        velocity_mass_weighted_y_sq,
-        velocity_mass_weighted_z_sq,
-        velocity_mass_weighted_1,
-        velocity_mass_weighted_2,
-        velocity_mass_weighted_3,
-        velocity_mass_weighted_1_sq,
-        velocity_mass_weighted_2_sq,
-        velocity_mass_weighted_3_sq
-      };
       for (Field f : volume_weighted_fields) {
         rprof(c, f, bin) /= sample_count;
       }
       for (Field f : mass_weighted_fields) {
         rprof(c, f, bin) /= density_sum;
       }
-
-      // TODO Add more fields...
     });
   }
   Kokkos::fence();  // results ready for caller, including asynchronous GPU normalization
