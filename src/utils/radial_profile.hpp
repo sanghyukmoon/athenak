@@ -4,7 +4,6 @@
 #include <cstdint>
 
 #include "athena.hpp"
-#include "Kokkos_ScatterView.hpp"
 
 class Mesh;
 
