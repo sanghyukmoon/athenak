@@ -21,15 +21,10 @@ struct RadialProfileCenter {
 // Centers must be ready before Compute and unchanged until it returns. Their view
 // extent is the active count; the calculator neither modifies nor retains them.
 //
-// To avoid coordinate singularity, the central cell is subdivided into nsub^3 subcells,
-// where nsub is even. If the radial profile center is at the cell center, no subcell
-// center will coincide with the singularity. If the radial profile center is not at the
-// cell center, the radial profile calculation may encounter the singularity.
-//
-// Along the z axis, the azimuth angle is undefined; we may choose to perform similar
-// subcell correction there; for now, we take arbitrary phi=0 convention at z axis.
-// Beyond the subcell correction region, the contribution of this on-axis cell will be
-// small.
+// Profile centers must be mesh cell centers. Even nsub avoids singular sample
+// positions in the central subcell region. Outer polar-axis cells use the same
+// subdivision to average spherical projections and their moments within each
+// cell, retaining the parent radial bin and weight.
 
 class RadialProfile {
  public:
@@ -64,7 +59,7 @@ class RadialProfile {
     velocity_mass_weighted_3_sq = 26,
     nfields = 27
   };
-  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce);
+  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce = true);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
