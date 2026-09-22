@@ -45,8 +45,9 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   Real rmax = pin->GetReal("problem", "rmax");
   int nbins_subcell = pin->GetInteger("problem", "nbins_subcell");
   int nsub = pin->GetInteger("problem", "nsub");
+  bool mpi_allreduce = pin->GetOrAddBoolean("problem", "mpi_allreduce", true);
 
-  RadialProfile radial_profile(pm, rmax, nbins_subcell, nsub);
+  RadialProfile radial_profile(pm, rmax, nbins_subcell, nsub, mpi_allreduce);
   radial_profile.measure_time = true;
   const auto centers = DomainCenter(pm);
   Kokkos::fence();
@@ -61,8 +62,13 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   const double elapsed = clock.seconds();
   double max_elapsed = elapsed;
   #if MPI_PARALLEL_ENABLED
-  MPI_Reduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
-             MPI_MAX, 0, MPI_COMM_WORLD);
+  if (mpi_allreduce) {
+    MPI_Allreduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
+                  MPI_MAX, MPI_COMM_WORLD);
+  } else {
+    MPI_Reduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
+               MPI_MAX, 0, MPI_COMM_WORLD);
+  }
   #endif
   std::uint64_t zonecycles = static_cast<uint64_t>(pm->nmb_total) * num_centers *
                              pm->NumberOfMeshBlockCells();
