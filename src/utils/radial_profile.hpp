@@ -64,7 +64,7 @@ class RadialProfile {
     velocity_mass_weighted_3_sq = 26,
     nfields = 27
   };
-  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
+  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
@@ -78,6 +78,7 @@ class RadialProfile {
   const int num_bins;
   const int num_bins_subcell;
   const int nsub;
+  bool use_allreduce;
 
  private:
   Mesh *mesh_;

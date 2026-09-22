@@ -64,11 +64,12 @@ void CartesianToSpherical(Real vx, Real vy, Real vz,
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
-                             int corrected_bins, int num_subcells)
+                             int corrected_bins, int num_subcells, bool mpi_allreduce)
     : bin_width(mesh->mesh_size.dx1),
       num_bins(BinIndex(requested_rmax, bin_width)),
       num_bins_subcell(corrected_bins),
       nsub(num_subcells),
+      use_allreduce(mpi_allreduce),
       mesh_(mesh) {
   if (nsub % 2 != 0) Fail("nsub must be even to avoid singularity at the center");
   if (num_bins_subcell < 1) Fail("At least one subcell bin is needed to avoid singularity");
@@ -275,11 +276,17 @@ DvceArray3D<Real> RadialProfile::Compute(
   // Only rank 0's result is globally normalized and ready on return.
 #if MPI_PARALLEL_ENABLED
   const int count = static_cast<int>(ncenter*nfields*num_bins);
-  const int status = MPI_Reduce(
-      (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
-      (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
-      count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
-  );
+  if (use_allreduce) {
+    const int status = MPI_Allreduce(
+        MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
+    );
+  } else {
+    const int status = MPI_Reduce(
+        (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
+        (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
+        count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
+    );
+  }
   if (status != MPI_SUCCESS) Fail("device-buffer MPI_Reduce failed");
 #endif
   phase(timings.reduction);
