@@ -190,29 +190,72 @@ DvceArray3D<Real> RadialProfile::Compute(
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
-    const Real rsph = sqrt(x*x+y*y+z*z);
+    Real rsph = sqrt(x*x+y*y+z*z);
     const int bin = BinIndex(rsph, dr);
     const bool is_valid_bin = is_subcell ? bin < nbins_sub
                                   : nbins_sub <= bin && bin < nbins;
     if (is_valid_bin) {
-      // even number of subcell avoids central singularity: rsph > 0 is guaranteed.
-      const Real rcyl = sqrt(x*x+y*y);
-      const Real cos_th = z/rsph;
-      const Real sin_th = rcyl/rsph;
-      const Real cos_ph = rcyl > 0.0 ? x/rcyl : 1.0;
-      const Real sin_ph = rcyl > 0.0 ? y/rcyl : 0.0;
-
       const Real vx = w0(m, IVX, k, j, i);
       const Real vy = w0(m, IVY, k, j, i);
       const Real vz = w0(m, IVZ, k, j, i);
-			Real v1, v2, v3;
-		  CartesianToSpherical(vx, vy, vz, cos_th, sin_th, cos_ph, sin_ph, v1, v2, v3);
       const Real px = u0(m, IM1, k, j, i);
       const Real py = u0(m, IM2, k, j, i);
       const Real pz = u0(m, IM3, k, j, i);
-      Real p1, p2, p3;
-      CartesianToSpherical(px, py, pz, cos_th, sin_th, cos_ph, sin_ph, p1, p2, p3);
 
+      // Cartesian-to-spherical transformation for vector quantities
+      // The basis vectors \hat{\theta} and \hat{\phi} are undefined at R=0; for those
+      // cells, we subdivide the parent cell into nquad^3 subcells, and average the
+      const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx1 && std::abs(y) < 0.5*dx2;
+      const int nquad = on_axis ? nsubcells : 1;
+      Real v_sph[3] = {}, v_sph_sq[3] = {};
+      Real p_sph[3] = {}, pv_sph[3] = {};
+      for (int kk = 0; kk < nquad; ++kk) {
+        for (int jj = 0; jj < nquad; ++jj) {
+          for (int ii = 0; ii < nquad; ++ii) {
+            Real xq = x, yq = y, zq = z;
+            if (on_axis) {
+              xq += ((ii+0.5)/nquad-0.5)*dx1;
+              yq += ((jj+0.5)/nquad-0.5)*dx2;
+              zq += ((kk+0.5)/nquad-0.5)*dx3;
+              xq -= lx1*round(xq/lx1);
+              yq -= lx2*round(yq/lx2);
+              zq -= lx3*round(zq/lx3);
+            }
+            rsph = sqrt(xq*xq+yq*yq+zq*zq);
+            const Real rcyl = sqrt(xq*xq+yq*yq);
+            const Real cos_th = zq/rsph;
+            const Real sin_th = rcyl/rsph;
+            const Real cos_ph = xq/rcyl;
+            const Real sin_ph = yq/rcyl;
+            Real v[3], p[3];
+            CartesianToSpherical(vx, vy, vz, cos_th, sin_th, cos_ph, sin_ph,
+                                 v[0], v[1], v[2]);
+            CartesianToSpherical(px, py, pz, cos_th, sin_th, cos_ph, sin_ph,
+                                 p[0], p[1], p[2]);
+            for (int a = 0; a < 3; ++a) {
+              v_sph[a] += v[a];
+              v_sph_sq[a] += v[a]*v[a];
+              p_sph[a] += p[a];
+              pv_sph[a] += p[a]*v[a];
+            }
+          }
+        }
+      }
+      if (on_axis) {
+        const Real samples = static_cast<Real>(nquad)*nquad*nquad;
+        for (int a = 0; a < 3; ++a) {
+          v_sph[a] /= samples;
+          v_sph_sq[a] /= samples;
+          p_sph[a] /= samples;
+          pv_sph[a] /= samples;
+        }
+      }
+      const Real &v1 = v_sph[0], &v2 = v_sph[1], &v3 = v_sph[2];
+      const Real &v1_sq = v_sph_sq[0], &v2_sq = v_sph_sq[1], &v3_sq = v_sph_sq[2];
+      const Real &p1 = p_sph[0], &p2 = p_sph[1], &p3 = p_sph[2];
+      const Real &pv1 = pv_sph[0], &pv2 = pv_sph[1], &pv3 = pv_sph[2];
+
+      // Add fields to the bin
       auto sum = scatter.access();
       sum(c, shell_volume, bin) += 1.0;
       sum(c, shell_mass, bin) += u0(m, IDN, k, j, i);
@@ -234,13 +277,12 @@ DvceArray3D<Real> RadialProfile::Compute(
       sum(c, velocity_mass_weighted_1, bin) += p1;
       sum(c, velocity_mass_weighted_2, bin) += p2;
       sum(c, velocity_mass_weighted_3, bin) += p3;
-      sum(c, velocity_1_sq, bin) += v1*v1;
-      sum(c, velocity_2_sq, bin) += v2*v2;
-      sum(c, velocity_3_sq, bin) += v3*v3;
-      sum(c, velocity_mass_weighted_1_sq, bin) += p1*v1;
-      sum(c, velocity_mass_weighted_2_sq, bin) += p2*v2;
-      sum(c, velocity_mass_weighted_3_sq, bin) += p3*v3;
-
+      sum(c, velocity_1_sq, bin) += v1_sq;
+      sum(c, velocity_2_sq, bin) += v2_sq;
+      sum(c, velocity_3_sq, bin) += v3_sq;
+      sum(c, velocity_mass_weighted_1_sq, bin) += pv1;
+      sum(c, velocity_mass_weighted_2_sq, bin) += pv2;
+      sum(c, velocity_mass_weighted_3_sq, bin) += pv3;
       // TODO Add more fields...
     }
     return bin;
@@ -276,18 +318,19 @@ DvceArray3D<Real> RadialProfile::Compute(
   // Only rank 0's result is globally normalized and ready on return.
 #if MPI_PARALLEL_ENABLED
   const int count = static_cast<int>(ncenter*nfields*num_bins);
+  int status;
   if (use_allreduce) {
-    const int status = MPI_Allreduce(
+    status = MPI_Allreduce(
         MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
     );
   } else {
-    const int status = MPI_Reduce(
+    status = MPI_Reduce(
         (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
         (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
         count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
     );
   }
-  if (status != MPI_SUCCESS) Fail("device-buffer MPI_Reduce failed");
+  if (status != MPI_SUCCESS) Fail("device-buffer MPI reduction failed");
 #endif
   phase(timings.reduction);
 
