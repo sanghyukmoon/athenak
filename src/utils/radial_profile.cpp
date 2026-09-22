@@ -424,7 +424,8 @@ DvceArray3D<Real> RadialProfile::Compute(
     bfield_x_sq, bfield_y_sq, bfield_z_sq,
     bfield_1, bfield_2, bfield_3,
     bfield_1_sq, bfield_2_sq, bfield_3_sq,
-    gravity_1, fraction_negative_gravity_1
+    gravity_1, fraction_negative_gravity_1,
+    rhoxgx, rhoygy, rhozgz
   };
   constexpr Field mass_weighted_fields[] = {
     velocity_mass_weighted_x, velocity_mass_weighted_y, velocity_mass_weighted_z,
@@ -432,8 +433,7 @@ DvceArray3D<Real> RadialProfile::Compute(
     velocity_mass_weighted_x_sq, velocity_mass_weighted_y_sq, velocity_mass_weighted_z_sq,
     velocity_mass_weighted_1, velocity_mass_weighted_2, velocity_mass_weighted_3,
     velocity_mass_weighted_1_sq, velocity_mass_weighted_2_sq, velocity_mass_weighted_3_sq,
-    potential_mass_weighted, gravity_mass_weighted_1,
-    rhoxgx, rhoygy, rhozgz
+    potential_mass_weighted, gravity_mass_weighted_1
   };
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
