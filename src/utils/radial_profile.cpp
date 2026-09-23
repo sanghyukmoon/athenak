@@ -32,10 +32,6 @@ namespace {
   std::exit(EXIT_FAILURE);
 }
 
-struct SubcellParent {
-  int c, m, k, j, i;
-};
-
 // Consider:
 // -----------------------------------------------------
 // 0   |   1   |   2   | ... |   n-1   |     n     | ...
@@ -105,7 +101,7 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
 //                    = dvol_subcell     bin < nbins_sub
 
 DvceArray3D<Real> RadialProfile::Compute(
-    const DvceArray1D<const RadialProfileCenter>& centers) {
+    const DvceArray1D<const RadialProfileCenter> &centers) {
   // Local timer lambda
   Kokkos::Timer clock;
   double start = 0;
@@ -122,22 +118,77 @@ DvceArray3D<Real> RadialProfile::Compute(
     Kokkos::fence();
     clock.reset();
   }
+
+  // Allocate result arrays
   const int ncenter = centers.extent(0);
   auto rprof = DvceArray3D<Real>("radial_profile", ncenter, nfields, num_bins);
-  const auto scatter = Kokkos::Experimental::create_scatter_view(rprof);
-  const int side = 2*num_bins_subcell+1;
-  DvceArray1D<SubcellParent> parent_cells = DvceArray1D<SubcellParent>(
-      "subcell_parents", ncenter*side*side*side
-  );
-  Kokkos::DualView<int> parent_count("subcell_parent_count");
-  auto parent_count_dview = parent_count.view_device();
-  phase(timings.allocation);
   if (ncenter == 0) {
     Kokkos::fence();
     if (measure_time) timings.total = clock.seconds();
     return rprof;
   }
+  const int side = 2*num_bins_subcell+1;
+  DvceArray1D<SubcellParent> subcell_parents = DvceArray1D<SubcellParent>(
+      "subcell_parents", ncenter*side*side*side
+  );
+  Kokkos::DualView<int> parent_count("subcell_parent_count");
+  phase(timings.allocation);
 
+  // =======================================================
+  // Step 1. Perform the radial binning
+  // =======================================================
+  // 1-1. Loop over cells and accumulate the radial profiles into bins
+  AccumulateShells(rprof, subcell_parents, parent_count, centers);
+  Kokkos::fence();  // complete device writes before MPI reads this memory
+  phase(timings.accumulation);
+
+  // 1-2. Reduce across MPI ranks, if any.
+  // Only rank 0's result is globally normalized and ready on return.
+  // TODO(SMOON) if we make timer member function, than we may move MPI reduction into
+  // AccumulateShells
+  // TODO(SMOON) Consider using MPI_Reduce_scatter_block
+#if MPI_PARALLEL_ENABLED
+  const int count = static_cast<int>(ncenter*nfields*num_bins);
+  int status;
+  if (use_allreduce) {
+    status = MPI_Allreduce(
+        MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
+    );
+  } else {
+    status = MPI_Reduce(
+        (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
+        (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
+        count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
+    );
+  }
+  if (status != MPI_SUCCESS) Fail("device-buffer MPI reduction failed");
+#endif
+  phase(timings.reduction);
+
+  // =============================================================
+  // Step 2. Construct radial profile through proper normalization
+  // =============================================================
+  NormalizeProfiles(rprof);
+
+  // =============================================================
+  // Step 3. Calculate magnetic flux
+  // =============================================================
+  // flux calculation goes here
+  //
+
+  phase(timings.normalization);
+  if (measure_time) timings.total = clock.seconds();
+  return rprof;
+}
+
+void RadialProfile::AccumulateShells(
+    DvceArray3D<Real> &rprof,
+    DvceArray1D<SubcellParent> &subcell_parents,
+    Kokkos::DualView<int> &parent_count,
+    const DvceArray1D<const RadialProfileCenter> &centers
+) {
+  const auto scatter = Kokkos::Experimental::create_scatter_view(rprof);
+  const int ncenter = centers.extent(0);
   // Capture variables
   DvceArray5D<Real> u0, w0, bcc0, phi;
   const auto *pack = mesh_->pmb_pack;
@@ -350,9 +401,6 @@ DvceArray3D<Real> RadialProfile::Compute(
   };
   // END_KOKKOS_LAMBDA
 
-  // =======================================================
-  // Step 1. Perform the radial binning
-  // =======================================================
   par_for<std::int64_t>("radial_binning", DevExeSpace(),
       0, static_cast<int>(ncenter)-1, 0, static_cast<int>(nmb)-1,
       indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
@@ -360,8 +408,8 @@ DvceArray3D<Real> RadialProfile::Compute(
     const int bin = DumpCellToBin(c, m, k, j, i, -1, -1, -1);
     // Record parent cell information needed for the subsequent subcell corection.
     if (nbins_sub > 0 && bin <= nbins_sub) {
-      const int idx = Kokkos::atomic_fetch_add(&parent_count_dview(), 1);
-      parent_cells(idx) = {c, m, k, j, i};
+      const int idx = Kokkos::atomic_fetch_add(&parent_count.view_device()(), 1);
+      subcell_parents(idx) = {c, m, k, j, i};
     }
   });
   parent_count.modify_device();
@@ -369,80 +417,51 @@ DvceArray3D<Real> RadialProfile::Compute(
   par_for("subcell_correction", DevExeSpace(), 0, parent_count.view_host()()-1,
       0, nsub-1, 0, nsub-1, 0, nsub-1,
       KOKKOS_LAMBDA(int idx, int ksub, int jsub, int isub) {
-    const auto &parent = parent_cells(idx);
+    const auto &parent = subcell_parents(idx);
     DumpCellToBin(parent.c, parent.m, parent.k, parent.j, parent.i, ksub, jsub, isub);
   });
   Kokkos::Experimental::contribute(rprof, scatter);
-  Kokkos::fence();  // complete device writes before MPI reads this memory
-  phase(timings.accumulation);
-  // Reduce across MPI ranks, if any.
-  // Only rank 0's result is globally normalized and ready on return.
-#if MPI_PARALLEL_ENABLED
-  const int count = static_cast<int>(ncenter*nfields*num_bins);
-  int status;
-  if (use_allreduce) {
-    status = MPI_Allreduce(
-        MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
-    );
-  } else {
-    status = MPI_Reduce(
-        (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
-        (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
-        count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
-    );
-  }
-  if (status != MPI_SUCCESS) Fail("device-buffer MPI reduction failed");
-#endif
-  phase(timings.reduction);
+}
 
-  // =======================================================
-  // Step 2. Normalize the radial profiles
-  // =======================================================
-  constexpr Field volume_weighted_fields[] = {
-    density_sq,
-    velocity_x, velocity_y, velocity_z,
-    velocity_xy, velocity_xz, velocity_yz,
-    velocity_x_sq, velocity_y_sq, velocity_z_sq,
-    angular_momentum_density_x, angular_momentum_density_y, angular_momentum_density_z,
-    velocity_1, velocity_2, velocity_3,
-    velocity_1_sq, velocity_2_sq, velocity_3_sq,
-    mass_flux_in, mass_flux_out,
-    bfield_x, bfield_y, bfield_z,
-    bfield_x_sq, bfield_y_sq, bfield_z_sq,
-    bfield_1, bfield_2, bfield_3,
-    bfield_1_sq, bfield_2_sq, bfield_3_sq,
-    gravity_1, fraction_negative_gravity_1,
-    rhoxgx, rhoygy, rhozgz
-  };
+void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
+  constexpr Field volume_weighted_fields[] = {density_sq, velocity_x, velocity_y,
+    velocity_z, velocity_xy, velocity_xz, velocity_yz, velocity_x_sq, velocity_y_sq,
+    velocity_z_sq, angular_momentum_density_x, angular_momentum_density_y,
+    angular_momentum_density_z, velocity_1, velocity_2, velocity_3, velocity_1_sq,
+    velocity_2_sq, velocity_3_sq, mass_flux_in, mass_flux_out, bfield_x, bfield_y,
+    bfield_z, bfield_x_sq, bfield_y_sq, bfield_z_sq, bfield_1, bfield_2, bfield_3,
+    bfield_1_sq, bfield_2_sq, bfield_3_sq, gravity_1, fraction_negative_gravity_1, rhoxgx,
+    rhoygy, rhozgz};
   constexpr Field mass_weighted_fields[] = {
     velocity_mass_weighted_x, velocity_mass_weighted_y, velocity_mass_weighted_z,
     velocity_mass_weighted_xy, velocity_mass_weighted_xz, velocity_mass_weighted_yz,
     velocity_mass_weighted_x_sq, velocity_mass_weighted_y_sq, velocity_mass_weighted_z_sq,
     velocity_mass_weighted_1, velocity_mass_weighted_2, velocity_mass_weighted_3,
     velocity_mass_weighted_1_sq, velocity_mass_weighted_2_sq, velocity_mass_weighted_3_sq,
-    potential_mass_weighted, gravity_mass_weighted_1
-  };
+    potential_mass_weighted, gravity_mass_weighted_1};
+
+  // Capture variables
+  const int nbins_sub = num_bins_subcell;
+  const auto &mesh_size = mesh_->mesh_size;
+  const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
+  const Real dvol_subcell = dvol/nsub/nsub/nsub;
+  //TODO(SMOON) Need to change if we do Reduce_Scatter
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
-        0, static_cast<int>(ncenter)-1, 0, nbins-1,
+        0, static_cast<int>(rprof.extent(0))-1,
+        0, num_bins-1,
         KOKKOS_LAMBDA(int c, int bin) {
-      const Real volume_element = bin < nbins_sub ? dvol_subcell : dvol;
-      const Real sample_count = rprof(c, shell_volume, bin);
-      const Real density_sum = rprof(c, shell_mass, bin);
-      rprof(c, shell_volume, bin) = sample_count*volume_element;
-      rprof(c, shell_mass, bin) = density_sum*volume_element;
-      rprof(c, density, bin) = density_sum/sample_count;
-      for (Field f : volume_weighted_fields) {
-        rprof(c, f, bin) /= sample_count;
-      }
-      for (Field f : mass_weighted_fields) {
-        rprof(c, f, bin) /= density_sum;
-      }
-    });
+          const Real volume_element = bin < nbins_sub ? dvol_subcell : dvol;
+          const Real sample_count = rprof(c, shell_volume, bin);
+          const Real density_sum = rprof(c, shell_mass, bin);
+          rprof(c, shell_volume, bin) = sample_count*volume_element;
+          rprof(c, shell_mass, bin) = density_sum*volume_element;
+          rprof(c, density, bin) = density_sum/sample_count;
+          for (Field f : volume_weighted_fields) {
+            rprof(c, f, bin) /= sample_count;
+          }
+          for (Field f : mass_weighted_fields) {
+            rprof(c, f, bin) /= density_sum;
+          }});
   }
-  Kokkos::fence();  // results ready for caller, including asynchronous GPU normalization
-  phase(timings.normalization);
-  if (measure_time) timings.total = clock.seconds();
-
-  return rprof;
 }

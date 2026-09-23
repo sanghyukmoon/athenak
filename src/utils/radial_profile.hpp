@@ -97,6 +97,12 @@ class RadialProfile {
   };
   RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce = true);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
+  void AccumulateShells(
+      DvceArray3D<Real> &rprof,
+      DvceArray1D<SubcellParent> &subcell_parents,
+      Kokkos::DualView<int> &parent_count,
+      const DvceArray1D<const RadialProfileCenter> &centers);
+  void NormalizeProfiles(DvceArray3D<Real> &rprof);
 
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
@@ -113,6 +119,6 @@ class RadialProfile {
 
  private:
   Mesh *mesh_;
-
+  struct SubcellParent {int c, m, k, j, i;};
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_
