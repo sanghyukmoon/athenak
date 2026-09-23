@@ -84,28 +84,21 @@ class RadialProfile {
     rhoxgx = 55,
     rhoygy = 56,
     rhozgz = 57,
-    mean_field_x = 58,
-    mean_field_y = 59,
-    mean_field_z = 60,
+    enclosed_field_x = 58,
+    enclosed_field_y = 59,
+    enclosed_field_z = 60,
     nfields = 61
   };
-  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
-  DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
   struct Timings {
-    double allocation = 0, accumulation = 0;
-    double reduction = 0, normalization = 0, total = 0;
+    double allocation = 0, accumulation = 0, normalization = 0;
+    double reduction = 0, flux = 0, total = 0;
   } timings;
-
- private:
   struct SubcellParent {int c, m, k, j, i;};
-  Mesh *mesh_;
-  const Real dr_;
-  const int nbins_;
-  const int nbins_subcell_corrected_;
-  const int nsub_;
 
+  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
+  DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
   void AccumulateShells(
       DvceArray3D<Real> &rprof,
       DvceArray1D<SubcellParent> &subcell_parents,
@@ -117,5 +110,12 @@ class RadialProfile {
       const DvceArray1D<SubcellParent> &subcell_parents,
       const Kokkos::DualView<int> &parent_count,
       const DvceArray1D<const RadialProfileCenter> &centers);
+
+ private:
+  Mesh *mesh_;
+  const Real dr_;
+  const int nbins_;
+  const int nbins_subcell_corrected_;
+  const int nsub_;
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_

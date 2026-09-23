@@ -164,8 +164,10 @@ DvceArray3D<Real> RadialProfile::Compute(
   // =============================================================
   // flux calculation goes here
   CalculateMagneticFlux(rprof, subcell_parents, parent_count, centers);
+  phase(timings.flux);
 
   if (measure_time) timings.total = clock.seconds();
+
   return rprof;
 }
 
@@ -457,6 +459,42 @@ void RadialProfile::CalculateMagneticFlux(
     const Kokkos::DualView<int> &parent_count,
     const DvceArray1D<const RadialProfileCenter> &centers) {
 
-    // Calculate mean magnetic fields here
+  if (mesh_->pmb_pack->pmhd == nullptr) return;
 
+  const int ncenter = centers.extent(0);
+  const int nbins = nbins_;
+  const Real dr = dr_;
+
+  par_for("enclosed_magnetic_field", DevExeSpace(),
+      0, ncenter-1,
+      KOKKOS_LAMBDA(int c) {
+        // Sum over complete shells preceding the current bin.
+        // The common volume factor 4*pi/3 cancels in the mean.
+        Real bfield_cum_integral[3] = {};
+
+        for (int bin = 0; bin < nbins; ++bin) {
+          const Real r = bin*dr;
+          const Real r_inner = (bin == 0) ? 0.0 : r - 0.5*dr;
+          const Real r_outer = r + 0.5*dr;
+
+          const Real r3 = r*r*r;
+          const Real r_inner3 = r_inner*r_inner*r_inner;
+          const Real r_outer3 = r_outer*r_outer*r_outer;
+
+          const Real shell_weight = r_outer3 - r_inner3;
+          const Real inner_weight = r3 - r_inner3;
+
+          for (int axis = 0; axis < 3; ++axis) {
+            const Real b_shell = rprof(c, bfield_x + axis, bin);
+            if (bin == 0) {
+              rprof(c, enclosed_field_x + axis, bin) = b_shell;
+            } else {
+              rprof(c, enclosed_field_x + axis, bin) =
+                  (bfield_cum_integral[axis] + b_shell*inner_weight)/r3;
+            }
+            bfield_cum_integral[axis] += b_shell*shell_weight;
+          }
+        }
+      });
+  // Now, calculate magnetic fluxes through the spherical shells.
 }
