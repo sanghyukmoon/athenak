@@ -17,8 +17,8 @@ struct RadialProfileCenter {
 // Radial shell averages on uniform, cubic-cell, periodic Cartesian meshes.
 // The caller supplies identical ordered centers, including current center-cell
 // velocities, on every MPI rank. Only rank 0's
-// returned view is globally normalized and ready on return. Returned views own
-// their data and remain valid across subsequent Compute calls.
+// returned view is globally normalized. Returned views own their data and remain valid
+// across subsequent Compute calls.
 // Centers must be ready before Compute and unchanged until it returns. Their view
 // extent is the active count; the calculator neither modifies nor retains them.
 //
@@ -97,13 +97,6 @@ class RadialProfile {
   };
   RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce = true);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
-  void AccumulateShells(
-      DvceArray3D<Real> &rprof,
-      DvceArray1D<SubcellParent> &subcell_parents,
-      Kokkos::DualView<int> &parent_count,
-      const DvceArray1D<const RadialProfileCenter> &centers);
-  void NormalizeProfiles(DvceArray3D<Real> &rprof);
-
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
   struct Timings {
@@ -111,14 +104,20 @@ class RadialProfile {
     double reduction = 0, normalization = 0, total = 0;
   } timings;
 
-  const Real bin_width;
-  const int num_bins;
-  const int num_bins_subcell;
-  const int nsub;
-  bool use_allreduce;
-
  private:
-  Mesh *mesh_;
   struct SubcellParent {int c, m, k, j, i;};
+  Mesh *mesh_;
+  const Real dr_;
+  const int nbins_;
+  const int nbins_subcell_corrected_;
+  const int nsub_;
+  bool use_allreduce_;
+
+  void AccumulateShells(
+      DvceArray3D<Real> &rprof,
+      DvceArray1D<SubcellParent> &subcell_parents,
+      Kokkos::DualView<int> &parent_count,
+      const DvceArray1D<const RadialProfileCenter> &centers);
+  void NormalizeProfiles(DvceArray3D<Real> &rprof);
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_
