@@ -55,13 +55,12 @@ void CartesianToSpherical(Real vx, Real vy, Real vz,
 }  // namespace
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
-                             int corrected_bins, int num_subcells, bool mpi_allreduce)
+                             int corrected_bins, int num_subcells)
     : mesh_(mesh),
       dr_(mesh->mesh_size.dx1),
       nbins_(BinIndex(requested_rmax, dr_)),
       nbins_subcell_corrected_(corrected_bins),
-      nsub_(num_subcells),
-      use_allreduce_(mpi_allreduce) {
+      nsub_(num_subcells) {
   if (nsub_ % 2 != 0) Fail("nsub must be even to avoid singularity at the center");
   if (nbins_subcell_corrected_ < 1) Fail("At least one subcell bin is needed to avoid singularity");
   if (nsub_ < 1) Fail("nsub must be positive");
@@ -91,14 +90,14 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
 //     shell_volume = sum_{ijk \in bin} dV_{ijk}
 //     shell_mass   = sum_{ijk \in bin} \rho_{ijk}*dV_{ijk}
 // However, because
-//     dV_{ijk} = dvol             bin >= nbins_sub
-//              = dvol_subcell     bin < nbins_sub
+//     dV_{ijk} = dvol             bin >= nbins_subcell_corrected
+//              = dvol_subcell     bin < nbins_subcell_corrected
 // is constant within a given bin, the dV_{ijk} factor can be factored out such that
 //     shell_volume = sample_count * volume_element
 //     shell_mass   = density_sum * volume_element,
 // where
-//     volume_element = dvol             bin >= nbins_sub
-//                    = dvol_subcell     bin < nbins_sub
+//     volume_element = dvol             bin >= nbins_subcell_corrected
+//                    = dvol_subcell     bin < nbins_subcell_corrected
 
 DvceArray3D<Real> RadialProfile::Compute(
     const DvceArray1D<const RadialProfileCenter> &centers) {
@@ -147,17 +146,9 @@ DvceArray3D<Real> RadialProfile::Compute(
   Kokkos::fence();  // complete device writes before MPI reads this memory
   const int count = static_cast<int>(ncenter*nfields*nbins_);
   int status;
-  if (use_allreduce_) {
-    status = MPI_Allreduce(
-        MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
-    );
-  } else {
-    status = MPI_Reduce(
-        (global_variable::my_rank == 0) ? MPI_IN_PLACE : rprof.data(), // send buffer
-        (global_variable::my_rank == 0) ? rprof.data() : nullptr,      // recv buffer
-        count, MPI_ATHENA_REAL, MPI_SUM, 0, MPI_COMM_WORLD
-    );
-  }
+  status = MPI_Allreduce(
+      MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
+  );
   if (status != MPI_SUCCESS) Fail("device-buffer MPI reduction failed");
 #endif
   phase(timings.reduction);
@@ -165,16 +156,15 @@ DvceArray3D<Real> RadialProfile::Compute(
   // =============================================================
   // Step 2. Construct radial profile through proper normalization
   // =============================================================
-  // Only rank 0's result is globally normalized
   NormalizeProfiles(rprof);
+  phase(timings.normalization);
 
   // =============================================================
   // Step 3. Calculate magnetic flux
   // =============================================================
   // flux calculation goes here
-  //
+  CalculateMagneticFlux(rprof, subcell_parents, parent_count, centers);
 
-  phase(timings.normalization);
   if (measure_time) timings.total = clock.seconds();
   return rprof;
 }
@@ -216,7 +206,7 @@ void RadialProfile::AccumulateShells(
   }
   const Real dr = dr_;
   const int nbins = nbins_;
-  const int nbins_sub = nbins_subcell_corrected_;
+  const int nbins_subcell_corrected = nbins_subcell_corrected_;
   const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
   const int nsub = nsub_;
 
@@ -240,8 +230,8 @@ void RadialProfile::AccumulateShells(
     z -= lx3*round(z/lx3);
     Real rsph = sqrt(x*x+y*y+z*z);
     const int bin = BinIndex(rsph, dr);
-    const bool is_valid_bin = is_subcell ? bin < nbins_sub
-                                  : nbins_sub <= bin && bin < nbins;
+    const bool is_valid_bin = is_subcell ? bin < nbins_subcell_corrected
+                                  : nbins_subcell_corrected <= bin && bin < nbins;
     if (is_valid_bin) {
       // Prepare fields
       const Real rho = u0(m, IDN, k, j, i);
@@ -403,7 +393,7 @@ void RadialProfile::AccumulateShells(
       KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
     const int bin = DumpCellToBin(c, m, k, j, i, -1, -1, -1);
     // Record parent cell information needed for the subsequent subcell corection.
-    if (nbins_sub > 0 && bin <= nbins_sub) {
+    if (nbins_subcell_corrected > 0 && bin <= nbins_subcell_corrected) {
       const int idx = Kokkos::atomic_fetch_add(&parent_count.view_device()(), 1);
       subcell_parents(idx) = {c, m, k, j, i};
     }
@@ -437,27 +427,36 @@ void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
     potential_mass_weighted, gravity_mass_weighted_1};
 
   // Capture variables
-  const int nbins_sub = nbins_subcell_corrected_;
+  const int nbins_subcell_corrected = nbins_subcell_corrected_;
   const auto &mesh_size = mesh_->mesh_size;
   const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
   const Real dvol_subcell = dvol/nsub_/nsub_/nsub_;
-  //TODO(SMOON) Need to change if we do Reduce_Scatter
-  if (global_variable::my_rank == 0) {
-    par_for("radial_profile_normalize", DevExeSpace(),
-        0, static_cast<int>(rprof.extent(0))-1,
-        0, nbins_-1,
-        KOKKOS_LAMBDA(int c, int bin) {
-          const Real volume_element = bin < nbins_sub ? dvol_subcell : dvol;
-          const Real sample_count = rprof(c, shell_volume, bin);
-          const Real density_sum = rprof(c, shell_mass, bin);
-          rprof(c, shell_volume, bin) = sample_count*volume_element;
-          rprof(c, shell_mass, bin) = density_sum*volume_element;
-          rprof(c, density, bin) = density_sum/sample_count;
-          for (Field f : volume_weighted_fields) {
-            rprof(c, f, bin) /= sample_count;
-          }
-          for (Field f : mass_weighted_fields) {
-            rprof(c, f, bin) /= density_sum;
-          }});
-  }
+  par_for("radial_profile_normalize", DevExeSpace(),
+      0, static_cast<int>(rprof.extent(0))-1,
+      0, nbins_-1,
+      KOKKOS_LAMBDA(int c, int bin) {
+        const Real volume_element = bin < nbins_subcell_corrected ? dvol_subcell : dvol;
+        const Real sample_count = rprof(c, shell_volume, bin);
+        const Real density_sum = rprof(c, shell_mass, bin);
+        rprof(c, shell_volume, bin) = sample_count*volume_element;
+        rprof(c, shell_mass, bin) = density_sum*volume_element;
+        rprof(c, density, bin) = density_sum/sample_count;
+        for (Field f : volume_weighted_fields) {
+          rprof(c, f, bin) /= sample_count;
+        }
+        for (Field f : mass_weighted_fields) {
+          rprof(c, f, bin) /= density_sum;
+        }
+      });
+}
+
+
+void RadialProfile::CalculateMagneticFlux(
+    DvceArray3D<Real> &rprof,
+    const DvceArray1D<SubcellParent> &subcell_parents,
+    const Kokkos::DualView<int> &parent_count,
+    const DvceArray1D<const RadialProfileCenter> &centers) {
+
+    // Calculate mean magnetic fields here
+
 }

@@ -16,20 +16,11 @@ struct RadialProfileCenter {
 
 // Radial shell averages on uniform, cubic-cell, periodic Cartesian meshes.
 // The caller supplies identical ordered centers, including current center-cell
-// velocities, on every MPI rank. Only rank 0's
-// returned view is globally normalized. Returned views own their data and remain valid
-// across subsequent Compute calls.
-// Centers must be ready before Compute and unchanged until it returns. Their view
-// extent is the active count; the calculator neither modifies nor retains them.
-//
-// Profile centers must be mesh cell centers. Even nsub avoids singular sample
-// positions in the central subcell region. Outer polar-axis cells use the same
-// subdivision to average spherical projections and their moments within each
-// cell, retaining the parent radial bin and weight. The caller must ensure
-// rmax <= half the shortest box length and synchronized fluid, bcc0 and potential
-// data, including valid first-layer potential ghosts. Compute never solves gravity.
-// Position moments and transport use sample positions; this mixed central/outer
-// estimator is not an exact nonoverlapping volume partition.
+// velocities, on every MPI rank.
+// Profile centers must be mesh cell centers. Setting nsub even number avoids coordinate
+// singularity at the origin. Outer polar-axis cells use the same subdivision to average
+// spherical projections and their moments within each cell, retaining the parent radial
+// bin and weight. The caller must ensure rmax <= (half the shortest box length).
 // Optional gravity/MHD slots are zero when absent; a future writer omits them.
 
 class RadialProfile {
@@ -93,9 +84,12 @@ class RadialProfile {
     rhoxgx = 55,
     rhoygy = 56,
     rhozgz = 57,
-    nfields = 58
+    mean_field_x = 58,
+    mean_field_y = 59,
+    mean_field_z = 60,
+    nfields = 61
   };
-  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4, bool mpi_allreduce = true);
+  RadialProfile(Mesh *mesh, Real rmax, int nbins_subcell = 4, int nsub = 4);
   DvceArray3D<Real> Compute(const DvceArray1D<const RadialProfileCenter>& centers);
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
@@ -111,7 +105,6 @@ class RadialProfile {
   const int nbins_;
   const int nbins_subcell_corrected_;
   const int nsub_;
-  bool use_allreduce_;
 
   void AccumulateShells(
       DvceArray3D<Real> &rprof,
@@ -119,5 +112,10 @@ class RadialProfile {
       Kokkos::DualView<int> &parent_count,
       const DvceArray1D<const RadialProfileCenter> &centers);
   void NormalizeProfiles(DvceArray3D<Real> &rprof);
+  void CalculateMagneticFlux(
+      DvceArray3D<Real> &rprof,
+      const DvceArray1D<SubcellParent> &subcell_parents,
+      const Kokkos::DualView<int> &parent_count,
+      const DvceArray1D<const RadialProfileCenter> &centers);
 };
 #endif  // UTILS_RADIAL_PROFILE_HPP_
