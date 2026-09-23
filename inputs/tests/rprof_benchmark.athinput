@@ -41,5 +41,5 @@ iso_sound_speed = 1.0
 
 <problem>
 rmax = 0.5
-nbins_subcell = 4
+nbins_subcell_corrected = 4
 nsub = 4
