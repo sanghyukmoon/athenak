@@ -56,16 +56,16 @@ void CartesianToSpherical(Real vx, Real vy, Real vz,
 
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
                              int corrected_bins, int num_subcells, bool mpi_allreduce)
-    : bin_width(mesh->mesh_size.dx1),
-      num_bins(BinIndex(requested_rmax, bin_width)),
-      num_bins_subcell(corrected_bins),
-      nsub(num_subcells),
-      use_allreduce(mpi_allreduce),
-      mesh_(mesh) {
-  if (nsub % 2 != 0) Fail("nsub must be even to avoid singularity at the center");
-  if (num_bins_subcell < 1) Fail("At least one subcell bin is needed to avoid singularity");
-  if (nsub < 1) Fail("nsub must be positive");
-  if (num_bins_subcell > num_bins) Fail("num_bins_subcell must be <= num_bins");
+    : mesh_(mesh),
+      dr_(mesh->mesh_size.dx1),
+      nbins_(BinIndex(requested_rmax, dr_)),
+      nbins_subcell_corrected_(corrected_bins),
+      nsub_(num_subcells),
+      use_allreduce_(mpi_allreduce) {
+  if (nsub_ % 2 != 0) Fail("nsub must be even to avoid singularity at the center");
+  if (nbins_subcell_corrected_ < 1) Fail("At least one subcell bin is needed to avoid singularity");
+  if (nsub_ < 1) Fail("nsub must be positive");
+  if (nbins_subcell_corrected_ > nbins_) Fail("num_bins_subcell must be <= num_bins");
 }
 
 
@@ -121,13 +121,13 @@ DvceArray3D<Real> RadialProfile::Compute(
 
   // Allocate result arrays
   const int ncenter = centers.extent(0);
-  auto rprof = DvceArray3D<Real>("radial_profile", ncenter, nfields, num_bins);
+  auto rprof = DvceArray3D<Real>("radial_profile", ncenter, nfields, nbins_);
   if (ncenter == 0) {
     Kokkos::fence();
     if (measure_time) timings.total = clock.seconds();
     return rprof;
   }
-  const int side = 2*num_bins_subcell+1;
+  const int side = 2*nbins_subcell_corrected_+1;
   DvceArray1D<SubcellParent> subcell_parents = DvceArray1D<SubcellParent>(
       "subcell_parents", ncenter*side*side*side
   );
@@ -139,18 +139,15 @@ DvceArray3D<Real> RadialProfile::Compute(
   // =======================================================
   // 1-1. Loop over cells and accumulate the radial profiles into bins
   AccumulateShells(rprof, subcell_parents, parent_count, centers);
-  Kokkos::fence();  // complete device writes before MPI reads this memory
   phase(timings.accumulation);
 
   // 1-2. Reduce across MPI ranks, if any.
-  // Only rank 0's result is globally normalized and ready on return.
-  // TODO(SMOON) if we make timer member function, than we may move MPI reduction into
-  // AccumulateShells
   // TODO(SMOON) Consider using MPI_Reduce_scatter_block
 #if MPI_PARALLEL_ENABLED
-  const int count = static_cast<int>(ncenter*nfields*num_bins);
+  Kokkos::fence();  // complete device writes before MPI reads this memory
+  const int count = static_cast<int>(ncenter*nfields*nbins_);
   int status;
-  if (use_allreduce) {
+  if (use_allreduce_) {
     status = MPI_Allreduce(
         MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
     );
@@ -168,6 +165,7 @@ DvceArray3D<Real> RadialProfile::Compute(
   // =============================================================
   // Step 2. Construct radial profile through proper normalization
   // =============================================================
+  // Only rank 0's result is globally normalized
   NormalizeProfiles(rprof);
 
   // =============================================================
@@ -206,7 +204,6 @@ void RadialProfile::AccumulateShells(
   }
   if (gravity) phi = pack->pgrav->phi;
   const auto &mesh_size = mesh_->mesh_size;
-  const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
   const Real lx1 = mesh_size.x1max - mesh_size.x1min;
   const Real lx2 = mesh_size.x2max - mesh_size.x2min;
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
@@ -217,12 +214,11 @@ void RadialProfile::AccumulateShells(
   if (static_cast<std::uint64_t>(ncenter)*nmb*ncells > std::numeric_limits<std::int64_t>::max()) {
     Fail("cell loop overflow");
   }
-  const Real dr = bin_width;
-  const int nbins = num_bins;
-  const int nbins_sub = num_bins_subcell;
+  const Real dr = dr_;
+  const int nbins = nbins_;
+  const int nbins_sub = nbins_subcell_corrected_;
   const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
-  const Real dvol_subcell = dvol/nsub/nsub/nsub;
-  const int nsubcells = nsub;
+  const int nsub = nsub_;
 
   // Kokkos lambda function to find bin and dump the cell data into that bin
   // Negative isub indicates that this is a parent cell, not a subcell.
@@ -235,9 +231,9 @@ void RadialProfile::AccumulateShells(
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
     Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
     if (is_subcell) {
-      x += ((isub+0.5)/nsubcells-0.5)*dx1;
-      y += ((jsub+0.5)/nsubcells-0.5)*dx2;
-      z += ((ksub+0.5)/nsubcells-0.5)*dx3;
+      x += ((isub+0.5)/nsub-0.5)*dx1;
+      y += ((jsub+0.5)/nsub-0.5)*dx2;
+      z += ((ksub+0.5)/nsub-0.5)*dx3;
     }
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
@@ -273,7 +269,7 @@ void RadialProfile::AccumulateShells(
       // The basis vectors \hat{\theta} and \hat{\phi} are undefined at R=0; for those
       // cells, average sample projections and nonlinear moments before scattering.
       const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx1 && std::abs(y) < 0.5*dx2;
-      const int nquad = on_axis ? nsubcells : 1;
+      const int nquad = on_axis ? nsub : 1;
       Real v_sph[3] = {}, v_sph_sq[3] = {};
       Real inward_mass_flux = 0.0, outward_mass_flux = 0.0;
       Real g1 = 0.0, neg_gr_flag = 0.0;
@@ -415,7 +411,7 @@ void RadialProfile::AccumulateShells(
   parent_count.modify_device();
   parent_count.sync_host();
   par_for("subcell_correction", DevExeSpace(), 0, parent_count.view_host()()-1,
-      0, nsub-1, 0, nsub-1, 0, nsub-1,
+      0, nsub_-1, 0, nsub_-1, 0, nsub_-1,
       KOKKOS_LAMBDA(int idx, int ksub, int jsub, int isub) {
     const auto &parent = subcell_parents(idx);
     DumpCellToBin(parent.c, parent.m, parent.k, parent.j, parent.i, ksub, jsub, isub);
@@ -441,15 +437,15 @@ void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
     potential_mass_weighted, gravity_mass_weighted_1};
 
   // Capture variables
-  const int nbins_sub = num_bins_subcell;
+  const int nbins_sub = nbins_subcell_corrected_;
   const auto &mesh_size = mesh_->mesh_size;
   const Real dvol = mesh_size.dx1*mesh_size.dx2*mesh_size.dx3;
-  const Real dvol_subcell = dvol/nsub/nsub/nsub;
+  const Real dvol_subcell = dvol/nsub_/nsub_/nsub_;
   //TODO(SMOON) Need to change if we do Reduce_Scatter
   if (global_variable::my_rank == 0) {
     par_for("radial_profile_normalize", DevExeSpace(),
         0, static_cast<int>(rprof.extent(0))-1,
-        0, num_bins-1,
+        0, nbins_-1,
         KOKKOS_LAMBDA(int c, int bin) {
           const Real volume_element = bin < nbins_sub ? dvol_subcell : dvol;
           const Real sample_count = rprof(c, shell_volume, bin);
