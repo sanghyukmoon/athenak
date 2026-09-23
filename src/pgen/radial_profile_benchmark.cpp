@@ -76,8 +76,9 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
     const auto &t = radial_profile.timings;
     std::cout << "Rank 0 timings (seconds per center): allocation=" << t.allocation/num_centers
               << " accumulation=" << t.accumulation/num_centers
-              << " reduction=" << t.reduction/num_centers
               << " normalization=" << t.normalization/num_centers
+              << " reduction=" << t.reduction/num_centers
+              << " flux calculation=" << t.flux/num_centers
               << " total=" << t.total/num_centers << std::endl;
   }
 }
