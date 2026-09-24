@@ -89,7 +89,18 @@ class RadialProfile {
     enclosed_field_z = 60,
     magnetic_flux_upper = 61,  // upper outward flux (B*length^2)
     magnetic_flux_lower = 62,  // minus lower outward flux (B*length^2)
-    nfields = 63
+    // Volume-weighted rho*v_i*rhat_j moments, with center-relative velocities.
+    // First index: velocity; second: radial direction. No symmetrization or area factor.
+    mass_flux_xx = 63,
+    mass_flux_yy = 64,
+    mass_flux_zz = 65,
+    mass_flux_xy = 66,
+    mass_flux_xz = 67,
+    mass_flux_yz = 68,
+    mass_flux_yx = 69,
+    mass_flux_zx = 70,
+    mass_flux_zy = 71,
+    nfields = 72
   };
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;

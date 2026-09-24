@@ -275,6 +275,7 @@ void RadialProfile::AccumulateShells(
       const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx && std::abs(y) < 0.5*dx;
       const int nquad = on_axis ? nsub : 1;
       Real v_sph[3] = {}, v_sph_sq[3] = {};
+      Real rhat[3] = {};
       Real inward_mass_flux = 0.0, outward_mass_flux = 0.0;
       Real g1 = 0.0, neg_gr_flag = 0.0;
       Real b_sph[3] = {}, b_sph_sq[3] = {};
@@ -288,6 +289,9 @@ void RadialProfile::AccumulateShells(
               zq += (-0.5*dx + (kk + 0.5)*dx/nsub);
             }
             rsph = sqrt(xq*xq+yq*yq+zq*zq);
+            rhat[0] += xq/rsph;
+            rhat[1] += yq/rsph;
+            rhat[2] += zq/rsph;
             const Real rcyl = sqrt(xq*xq+yq*yq);
             const Real cos_th = zq/rsph;
             const Real sin_th = rcyl/rsph;
@@ -326,6 +330,7 @@ void RadialProfile::AccumulateShells(
         g1 /= samples;
         neg_gr_flag /= samples;
         for (int ax = 0; ax < 3; ++ax) {
+          rhat[ax] /= samples;
           b_sph[ax] /= samples;
           b_sph_sq[ax] /= samples;
           v_sph[ax] /= samples;
@@ -373,6 +378,15 @@ void RadialProfile::AccumulateShells(
       sum(c, velocity_mass_weighted_3_sq, bin) += rho*v_sph_sq[2];
       sum(c, mass_flux_in, bin) += inward_mass_flux;
       sum(c, mass_flux_out, bin) += outward_mass_flux;
+      sum(c, mass_flux_xx, bin) += px*rhat[0];
+      sum(c, mass_flux_yy, bin) += py*rhat[1];
+      sum(c, mass_flux_zz, bin) += pz*rhat[2];
+      sum(c, mass_flux_xy, bin) += px*rhat[1];
+      sum(c, mass_flux_xz, bin) += px*rhat[2];
+      sum(c, mass_flux_yz, bin) += py*rhat[2];
+      sum(c, mass_flux_yx, bin) += py*rhat[0];
+      sum(c, mass_flux_zx, bin) += pz*rhat[0];
+      sum(c, mass_flux_zy, bin) += pz*rhat[1];
       if (mhd) {
         sum(c, bfield_x, bin) += bx;
         sum(c, bfield_y, bin) += by;
@@ -431,7 +445,8 @@ void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
     velocity_2_sq, velocity_3_sq, mass_flux_in, mass_flux_out, bfield_x, bfield_y,
     bfield_z, bfield_x_sq, bfield_y_sq, bfield_z_sq, bfield_1, bfield_2, bfield_3,
     bfield_1_sq, bfield_2_sq, bfield_3_sq, gravity_1, fraction_negative_gravity_1, rhoxgx,
-    rhoygy, rhozgz};
+    rhoygy, rhozgz, mass_flux_xx, mass_flux_yy, mass_flux_zz, mass_flux_xy,
+    mass_flux_xz, mass_flux_yz, mass_flux_yx, mass_flux_zx, mass_flux_zy};
   constexpr Field mass_weighted_fields[] = {
     velocity_mass_weighted_x, velocity_mass_weighted_y, velocity_mass_weighted_z,
     velocity_mass_weighted_xy, velocity_mass_weighted_xz, velocity_mass_weighted_yz,
