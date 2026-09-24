@@ -65,10 +65,18 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
   if (nbins_subcell_corrected_ < 1) Fail("At least one subcell bin is needed to avoid singularity");
   if (nsub_ < 1) Fail("nsub must be positive");
   if (nbins_subcell_corrected_ > nbins_) Fail("num_bins_subcell must be <= num_bins");
+  const auto &mesh_size = mesh->mesh_size;
+  const Real min_dx = std::min({mesh_size.dx1, mesh_size.dx2, mesh_size.dx3});
+  const Real max_dx = std::max({mesh_size.dx1, mesh_size.dx2, mesh_size.dx3});
+  // Allow roundoff in cell widths computed from the domain extents.
+  const Real tolerance = 64*std::numeric_limits<Real>::epsilon()*max_dx;
+  if (max_dx - min_dx > tolerance) {
+    Fail("Radial profile requires cubic cells");
+  }
   const Real half_box = 0.5*std::min({
-      mesh->mesh_size.x1max - mesh->mesh_size.x1min,
-      mesh->mesh_size.x2max - mesh->mesh_size.x2min,
-      mesh->mesh_size.x3max - mesh->mesh_size.x3min});
+      mesh_size.x1max - mesh_size.x1min,
+      mesh_size.x2max - mesh_size.x2min,
+      mesh_size.x3max - mesh_size.x3min});
   if (requested_rmax > half_box) {
     Fail("rmax must not exceed half the shortest box length");
   }
@@ -214,7 +222,7 @@ void RadialProfile::AccumulateShells(
   const Real dr = dr_;
   const int nbins = nbins_;
   const int nbins_subcell_corrected = nbins_subcell_corrected_;
-  const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
+  const Real dx = mesh_size.dx1;
   const int nsub = nsub_;
 
   // Kokkos lambda function to find bin and dump the cell data into that bin
@@ -228,9 +236,9 @@ void RadialProfile::AccumulateShells(
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
     Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
     if (is_subcell) {
-      x += ((isub+0.5)/nsub-0.5)*dx1;
-      y += ((jsub+0.5)/nsub-0.5)*dx2;
-      z += ((ksub+0.5)/nsub-0.5)*dx3;
+      x += (-0.5*dx + (isub + 0.5)*dx/nsub);
+      y += (-0.5*dx + (jsub + 0.5)*dx/nsub);
+      z += (-0.5*dx + (ksub + 0.5)*dx/nsub);
     }
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
@@ -251,9 +259,9 @@ void RadialProfile::AccumulateShells(
       Real phi_c, gx, gy, gz;
       if (gravity) {
         phi_c = phi(m, 0, k, j, i);
-        gx = -(phi(m, 0, k, j, i+1) - phi(m, 0, k, j, i-1))/(2.0*dx1);
-        gy = -(phi(m, 0, k, j+1, i) - phi(m, 0, k, j-1, i))/(2.0*dx2);
-        gz = -(phi(m, 0, k+1, j, i) - phi(m, 0, k-1, j, i))/(2.0*dx3);
+        gx = -(phi(m, 0, k, j, i+1) - phi(m, 0, k, j, i-1))/(2.0*dx);
+        gy = -(phi(m, 0, k, j+1, i) - phi(m, 0, k, j-1, i))/(2.0*dx);
+        gz = -(phi(m, 0, k+1, j, i) - phi(m, 0, k-1, j, i))/(2.0*dx);
       }
       Real bx, by, bz;
       if (mhd) {
@@ -265,7 +273,7 @@ void RadialProfile::AccumulateShells(
       // Prepare fields involving spherical vector components
       // The basis vectors \hat{\theta} and \hat{\phi} are undefined at R=0; for those
       // cells, average sample projections and nonlinear moments before scattering.
-      const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx1 && std::abs(y) < 0.5*dx2;
+      const bool on_axis = !is_subcell && std::abs(x) < 0.5*dx && std::abs(y) < 0.5*dx;
       const int nquad = on_axis ? nsub : 1;
       Real v_sph[3] = {}, v_sph_sq[3] = {};
       Real inward_mass_flux = 0.0, outward_mass_flux = 0.0;
@@ -276,9 +284,9 @@ void RadialProfile::AccumulateShells(
           for (int ii = 0; ii < nquad; ++ii) {
             Real xq = x, yq = y, zq = z;
             if (on_axis) {
-              xq += ((ii+0.5)/nquad-0.5)*dx1;
-              yq += ((jj+0.5)/nquad-0.5)*dx2;
-              zq += ((kk+0.5)/nquad-0.5)*dx3;
+              xq += (-0.5*dx + (ii + 0.5)*dx/nsub);
+              yq += (-0.5*dx + (jj + 0.5)*dx/nsub);
+              zq += (-0.5*dx + (kk + 0.5)*dx/nsub);
             }
             rsph = sqrt(xq*xq+yq*yq+zq*zq);
             const Real rcyl = sqrt(xq*xq+yq*yq);
@@ -513,7 +521,7 @@ void RadialProfile::CalculateMagneticFlux(
   const Real lx2 = mesh_size.x2max - mesh_size.x2min;
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
   const auto meshblock_sizes = pack->pmb->mb_size.d_view;
-  const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
+  const Real dx = mesh_size.dx1;
   const int nbins_subcell_corrected = nbins_subcell_corrected_;
 
   // The inside sample owns the exposed face. All positions and widths are physical.
@@ -532,14 +540,12 @@ void RadialProfile::CalculateMagneticFlux(
     if (!within_bin_range) return;
     for (int side = -1; side <= 1; side += 2) {
       const int offset = (side+1)/2;
-      const Real dx[3] = {dx1, dx2, dx3};
       const Real normal_field[3] = {b0.x1f(m,k,j,i+offset), b0.x2f(m,k,j+offset,i),
                                     b0.x3f(m,k+offset,j,i)};
-      const Real face_area[3] = {dx2*dx3, dx1*dx3, dx1*dx2};
       const Real lx[3] = {lx1, lx2, lx3};
       for (int axis = 0; axis < 3; ++axis) {
         Real neighbor[3] = {x, y, z};
-        neighbor[axis] += side*dx[axis];
+        neighbor[axis] += side*dx;
         neighbor[axis] -= lx[axis]*round(neighbor[axis]/lx[axis]);
         const Real rsph2 = SQR(neighbor[0]) + SQR(neighbor[1]) + SQR(neighbor[2]);
 
@@ -547,11 +553,11 @@ void RadialProfile::CalculateMagneticFlux(
         // face of the discrete hemisphere.
         if (rsph2 <= SQR(bin*dr)) continue;
 
-        const Real outward_flux = side*normal_field[axis]*face_area[axis];
+        const Real outward_flux = side*normal_field[axis]*SQR(dx);
         // Determine whether this face belongs to "upper" or "lower" hemisphere
-        Real xf = x + (axis == 0 ? side*0.5*dx[0] : 0.0);
-        Real yf = y + (axis == 1 ? side*0.5*dx[1] : 0.0);
-        Real zf = z + (axis == 2 ? side*0.5*dx[2] : 0.0);
+        Real xf = x + (axis == 0 ? side*0.5*dx : 0.0);
+        Real yf = y + (axis == 1 ? side*0.5*dx : 0.0);
+        Real zf = z + (axis == 2 ? side*0.5*dx : 0.0);
         // TODO(SMOON) Is this really necessary? We have already wrapped the cell center position.
         xf -= lx1*round(xf/lx1);
         yf -= lx2*round(yf/lx2);
