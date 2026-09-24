@@ -501,30 +501,26 @@ void RadialProfile::CalculateMagneticFlux(
   // Capture variables using the same physical-coordinate conventions as AccumulateShells.
   const auto *pack = mesh_->pmb_pack;
   const auto b0 = pack->pmhd->b0;
-  const auto meshblock_sizes = pack->pmb->mb_size.d_view;
   const auto indcs = mesh_->mb_indcs;
   const auto &mesh_size = mesh_->mesh_size;
   const Real lx1 = mesh_size.x1max - mesh_size.x1min;
   const Real lx2 = mesh_size.x2max - mesh_size.x2min;
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
+  const auto meshblock_sizes = pack->pmb->mb_size.d_view;
   const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
-  const int nx1 = mesh_->mesh_indcs.nx1;
-  const int nx2 = mesh_->mesh_indcs.nx2;
-  const int nx3 = mesh_->mesh_indcs.nx3;
   const int first_parent_bin = nbins_subcell_corrected_;
 
-  // The inside sample owns the exposed face. Use cell units for exact sphere
-  // boundaries and equator ties; face_area remains a physical area.
-  const auto AddFace = KOKKOS_LAMBDA(int c, int bin, Real x_dr, Real y_dr, Real z_dr,
-      int axis, int sign, Real width_dr, Real normal_field, Real face_area) {
-    const Real position_dr[3] = {x_dr, y_dr, z_dr};
-    Real neighbor_dr[3] = {x_dr, y_dr, z_dr};
-    const Real length_dr = axis == 0 ? nx1 : (axis == 1 ? nx2 : nx3);
-    neighbor_dr[axis] += sign*width_dr;
-    neighbor_dr[axis] -= length_dr*round(neighbor_dr[axis]/length_dr);
-    const Real radius_sq_dr = static_cast<Real>(bin)*bin;
-    if (neighbor_dr[0]*neighbor_dr[0] + neighbor_dr[1]*neighbor_dr[1] +
-        neighbor_dr[2]*neighbor_dr[2] <= radius_sq_dr) return;
+  // The inside sample owns the exposed face. All positions and widths are physical.
+  const auto AddFace = KOKKOS_LAMBDA(int c, int bin, Real x, Real y, Real z,
+      int axis, int sign, Real width, Real normal_field, Real face_area) {
+    const Real position[3] = {x, y, z};
+    Real neighbor[3] = {x, y, z};
+    const Real length = axis == 0 ? lx1 : (axis == 1 ? lx2 : lx3);
+    neighbor[axis] += sign*width;
+    neighbor[axis] -= length*round(neighbor[axis]/length);
+    const Real radius = bin*dr;
+    if (neighbor[0]*neighbor[0] + neighbor[1]*neighbor[1] +
+        neighbor[2]*neighbor[2] <= radius*radius) return;
 
     const Real outward_flux = sign*normal_field*face_area;
     if (!Kokkos::isfinite(outward_flux)) {
@@ -544,10 +540,10 @@ void RadialProfile::CalculateMagneticFlux(
     if (scale == 0.0) return;
     Real dot = 0.0;
     for (int a = 0; a < 3; ++a) {
-      const Real length_dr = a == 0 ? nx1 : (a == 1 ? nx2 : nx3);
-      Real face_position_dr = position_dr[a] + (a == axis ? 0.5*sign*width_dr : 0.0);
-      face_position_dr -= length_dr*round(face_position_dr/length_dr);
-      dot += face_position_dr*(direction[a]/scale);
+      const Real length = a == 0 ? lx1 : (a == 1 ? lx2 : lx3);
+      Real face_position = position[a] + (a == axis ? 0.5*sign*width : 0.0);
+      face_position -= length*round(face_position/length);
+      dot += face_position*(direction[a]/scale);
     }
     auto sum = scatter.access();
     if (dot > 0.0) {
@@ -572,18 +568,15 @@ void RadialProfile::CalculateMagneticFlux(
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
-    // Cell-centered offsets are exact lattice positions. Snap in cell units so
-    // roundoff cannot move a face to the next sphere through ceil(radius_dr).
-    const Real x_dr = round(x/dr), y_dr = round(y/dr), z_dr = round(z/dr);
-    const Real radius_dr = sqrt(x_dr*x_dr + y_dr*y_dr + z_dr*z_dr);
-    // Sphere containment uses ceil, independently of shell BinIndex().
-    const int bin = Kokkos::max(first_parent_bin, static_cast<int>(ceil(radius_dr)));
+    // Sphere containment uses physical distance and ceil, independently of shell BinIndex().
+    const int bin = Kokkos::max(first_parent_bin,
+        static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr)));
     if (bin >= nbins) return;
     for (int sign = -1; sign <= 1; sign += 2) {
       const int offset = (sign+1)/2;
-      AddFace(c, bin, x_dr, y_dr, z_dr, 0, sign, 1.0, b0.x1f(m,k,j,i+offset), dx2*dx3);
-      AddFace(c, bin, x_dr, y_dr, z_dr, 1, sign, 1.0, b0.x2f(m,k,j+offset,i), dx1*dx3);
-      AddFace(c, bin, x_dr, y_dr, z_dr, 2, sign, 1.0, b0.x3f(m,k+offset,j,i), dx1*dx2);
+      AddFace(c, bin, x, y, z, 0, sign, dx1, b0.x1f(m,k,j,i+offset), dx2*dx3);
+      AddFace(c, bin, x, y, z, 1, sign, dx2, b0.x2f(m,k,j+offset,i), dx1*dx3);
+      AddFace(c, bin, x, y, z, 2, sign, dx3, b0.x3f(m,k+offset,j,i), dx1*dx2);
     }
   });
 
