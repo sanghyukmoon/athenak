@@ -188,8 +188,7 @@ void RadialProfile::AccumulateShells(
     DvceArray3D<Real> &rprof,
     DvceArray1D<SubcellParent> &subcell_parents,
     Kokkos::DualView<int> &parent_count,
-    const DvceArray1D<const RadialProfileCenter> &centers
-) {
+    const DvceArray1D<const RadialProfileCenter> &centers) {
   const auto scatter = Kokkos::Experimental::create_scatter_view(rprof);
   const int ncenter = centers.extent(0);
   // Capture variables
@@ -222,15 +221,15 @@ void RadialProfile::AccumulateShells(
   const Real dr = dr_;
   const int nbins = nbins_;
   const int nbins_subcell_corrected = nbins_subcell_corrected_;
-  const Real dx = mesh_size.dx1;
   const int nsub = nsub_;
 
   // Kokkos lambda function to find bin and dump the cell data into that bin
-  // Negative isub indicates that this is a parent cell, not a subcell.
+  // Negative isub indicates that this is a native cell, not a subcell.
   const auto DumpCellToBin = KOKKOS_LAMBDA(
       int c, int m, int k, int j, int i, int ksub, int jsub, int isub) -> int {
     const bool is_subcell = isub >= 0;
     const auto &block_size = meshblock_sizes(m);
+    const Real dx = block_size.dx1;
     const auto &center = centers(c);
     Real x = CellCenterX(i-indcs.is, indcs.nx1, block_size.x1min, block_size.x1max) - center.x1;
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
@@ -465,7 +464,7 @@ void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
       });
 }
 
-
+// Calculate mean magnetic field and the magnetic flux and store the data to rprof.
 void RadialProfile::CalculateMagneticFlux(
     DvceArray3D<Real> &rprof,
     const DvceArray1D<SubcellParent> &subcell_parents,
@@ -477,7 +476,6 @@ void RadialProfile::CalculateMagneticFlux(
   const int ncenter = centers.extent(0);
   const int nbins = nbins_;
   const Real dr = dr_;
-
   par_for("enclosed_magnetic_field", DevExeSpace(),
       0, ncenter-1,
       KOKKOS_LAMBDA(int c) {
@@ -509,6 +507,7 @@ void RadialProfile::CalculateMagneticFlux(
           }
         }
       });
+
   // Now, calculate magnetic fluxes through the spherical shells.
   auto flux = DvceArray3D<Real>("hemisphere_flux", ncenter, 2, nbins_);
   const auto scatter = Kokkos::Experimental::create_scatter_view(flux);
@@ -524,7 +523,8 @@ void RadialProfile::CalculateMagneticFlux(
   const int nsub = nsub_;
   const int nbins_subcell_corrected = nbins_subcell_corrected_;
 
-  // The inside sample owns the exposed face. All positions and widths are physical.
+  // Kokkos lambda function to find bin and dump the cell face flux into that bin
+  // Negative isub indicates that this is a native cell, not a subcell.
   const auto DumpFaceToBin = KOKKOS_LAMBDA(
       int c, int m, int k, int j, int i, int ksub, int jsub, int isub) -> void {
     const bool is_subcell = isub >= 0;
@@ -535,9 +535,9 @@ void RadialProfile::CalculateMagneticFlux(
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
     Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
     if (is_subcell) {
-      x += -0.5*dx + (isub + 0.5)*dx/nsub;
-      y += -0.5*dx + (jsub + 0.5)*dx/nsub;
-      z += -0.5*dx + (ksub + 0.5)*dx/nsub;
+      x += (-0.5*dx + (isub + 0.5)*dx/nsub);
+      y += (-0.5*dx + (jsub + 0.5)*dx/nsub);
+      z += (-0.5*dx + (ksub + 0.5)*dx/nsub);
       dx /= nsub;
     }
     x -= lx1*round(x/lx1);
@@ -545,14 +545,15 @@ void RadialProfile::CalculateMagneticFlux(
     z -= lx3*round(z/lx3);
     // Sphere containment uses physical distance and ceil, independently of shell BinIndex().
     const int bin = static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr));
-    const bool within_bin_range = is_subcell
-        ? bin < nbins_subcell_corrected
-        : nbins_subcell_corrected <= bin && bin < nbins;
+    const bool within_bin_range = is_subcell ? bin < nbins_subcell_corrected
+                                  : nbins_subcell_corrected <= bin && bin < nbins;
     if (!within_bin_range) return;
+    const int subcell_index[3] = {isub, jsub, ksub};
+    const Real field_left[3] = {b0.x1f(m,k,j,i), b0.x2f(m,k,j,i), b0.x3f(m,k,j,i)};
+    const Real field_right[3] = {b0.x1f(m,k,j,i+1), b0.x2f(m,k,j+1,i), b0.x3f(m,k+1,j,i)};
+    const Real lx[3] = {lx1, lx2, lx3};
     for (int side = -1; side <= 1; side += 2) {
       const int offset = (side+1)/2;
-
-      const Real lx[3] = {lx1, lx2, lx3};
       for (int axis = 0; axis < 3; ++axis) {
         Real neighbor[3] = {x, y, z};
         neighbor[axis] += side*dx;
@@ -565,29 +566,18 @@ void RadialProfile::CalculateMagneticFlux(
 
         Real normal_field;
         if (is_subcell) {
-          const int subcell_index = axis == 0 ? isub : (axis == 1 ? jsub : ksub);
-          const Real field_left = axis == 0 ? b0.x1f(m,k,j,i)
-              : (axis == 1 ? b0.x2f(m,k,j,i) : b0.x3f(m,k,j,i));
-          const Real field_right = axis == 0 ? b0.x1f(m,k,j,i+1)
-              : (axis == 1 ? b0.x2f(m,k,j+1,i) : b0.x3f(m,k+1,j,i));
-          const Real fraction = static_cast<Real>(subcell_index + offset)/nsub;
-          normal_field = (1.0 - fraction)*field_left + fraction*field_right;
+          const Real w = static_cast<Real>(subcell_index[axis] + offset)/nsub;
+          normal_field = (1.0 - w)*field_left[axis] + w*field_right[axis];
         } else {
-          normal_field = axis == 0 ? b0.x1f(m,k,j,i+offset)
-              : (axis == 1 ? b0.x2f(m,k,j+offset,i) : b0.x3f(m,k+offset,j,i));
+          normal_field = offset == 0 ? field_left[axis] : field_right[axis];
         }
         const Real outward_flux = side*normal_field*SQR(dx);
         // Determine whether this face belongs to "upper" or "lower" hemisphere
-        Real xf = x + (axis == 0 ? side*0.5*dx : 0.0);
-        Real yf = y + (axis == 1 ? side*0.5*dx : 0.0);
-        Real zf = z + (axis == 2 ? side*0.5*dx : 0.0);
-        // TODO(SMOON) Is this really necessary? We have already wrapped the cell center position.
-        xf -= lx1*round(xf/lx1);
-        yf -= lx2*round(yf/lx2);
-        zf -= lx3*round(zf/lx3);
-        Real rdotB = (xf*rprof(c, enclosed_field_x, bin)
-                      + yf*rprof(c, enclosed_field_y, bin)
-                      + zf*rprof(c, enclosed_field_z, bin));
+        Real face_center[3] = {x, y, z};
+        face_center[axis] += side*0.5*dx;
+        Real rdotB = (face_center[0]*rprof(c, enclosed_field_x, bin)
+                      + face_center[1]*rprof(c, enclosed_field_y, bin)
+                      + face_center[2]*rprof(c, enclosed_field_z, bin));
         auto sum = scatter.access();
         if (rdotB > 0.0) {
           // Upper hemisphere
@@ -603,21 +593,21 @@ void RadialProfile::CalculateMagneticFlux(
       }
     }
   };
+  // END_KOKKOS_LAMBDA
 
-  par_for<std::int64_t>("parent_hemisphere_flux", DevExeSpace(),
+  par_for<std::int64_t>("magnetic_flux", DevExeSpace(),
       0, ncenter-1, 0, pack->nmb_thispack-1,
       indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
       KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
     DumpFaceToBin(c, m, k, j, i, -1, -1, -1);
   });
 
-  par_for("subcell_hemisphere_flux", DevExeSpace(), 0, parent_count.view_host()()-1,
+  par_for("flux_subcell_correction", DevExeSpace(), 0, parent_count.view_host()()-1,
       0, nsub-1, 0, nsub-1, 0, nsub-1,
       KOKKOS_LAMBDA(int idx, int ksub, int jsub, int isub) {
     const auto &parent = subcell_parents(idx);
     DumpFaceToBin(parent.c, parent.m, parent.k, parent.j, parent.i, ksub, jsub, isub);
   });
-
   Kokkos::Experimental::contribute(flux, scatter);
 #if MPI_PARALLEL_ENABLED
   Kokkos::fence();  // complete face sums before MPI reads the compact buffer
