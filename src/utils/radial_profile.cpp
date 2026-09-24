@@ -146,9 +146,8 @@ DvceArray3D<Real> RadialProfile::Compute(
   Kokkos::fence();  // complete device writes before MPI reads this memory
   const int count = static_cast<int>(ncenter*nfields*nbins_);
   int status;
-  status = MPI_Allreduce(
-      MPI_IN_PLACE, rprof.data(), count, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD
-  );
+  status = MPI_Allreduce(MPI_IN_PLACE, rprof.data(), count,
+                         MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
   if (status != MPI_SUCCESS) Fail("device-buffer MPI reduction failed");
 #endif
   phase(timings.reduction);
@@ -194,14 +193,14 @@ void RadialProfile::AccumulateShells(
     Fail("Radial profile requires either hydro or MHD turned on");
   }
   if (gravity) phi = pack->pgrav->phi;
+  const auto indcs = mesh_->mb_indcs;
   const auto &mesh_size = mesh_->mesh_size;
   const Real lx1 = mesh_size.x1max - mesh_size.x1min;
   const Real lx2 = mesh_size.x2max - mesh_size.x2min;
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
-  const auto meshblock_sizes = mesh_->pmb_pack->pmb->mb_size.d_view;
-  const auto indcs = mesh_->mb_indcs;
+  const auto meshblock_sizes = pack->pmb->mb_size.d_view;
   const std::uint64_t ncells = std::uint64_t(indcs.nx1)*indcs.nx2*indcs.nx3;
-  const std::uint64_t nmb = mesh_->pmb_pack->nmb_thispack;
+  const std::uint64_t nmb = pack->nmb_thispack;
   if (static_cast<std::uint64_t>(ncenter)*nmb*ncells > std::numeric_limits<std::int64_t>::max()) {
     Fail("cell loop overflow");
   }
@@ -231,9 +230,9 @@ void RadialProfile::AccumulateShells(
     z -= lx3*round(z/lx3);
     Real rsph = sqrt(x*x+y*y+z*z);
     const int bin = BinIndex(rsph, dr);
-    const bool is_valid_bin = is_subcell ? bin < nbins_subcell_corrected
+    const bool within_bin_range = is_subcell ? bin < nbins_subcell_corrected
                                   : nbins_subcell_corrected <= bin && bin < nbins;
-    if (is_valid_bin) {
+    if (within_bin_range) {
       // Prepare fields
       const Real rho = u0(m, IDN, k, j, i);
       const Real vx = w0(m, IVX, k, j, i) - center.vx;
@@ -496,7 +495,7 @@ void RadialProfile::CalculateMagneticFlux(
         }
       });
   // Now, calculate magnetic fluxes through the spherical shells.
-  auto flux = DvceArray3D<Real>("hemisphere_flux", ncenter, 2, nbins);
+  auto flux = DvceArray3D<Real>("hemisphere_flux", ncenter, 2, nbins_);
   const auto scatter = Kokkos::Experimental::create_scatter_view(flux);
   // Capture variables using the same physical-coordinate conventions as AccumulateShells.
   const auto *pack = mesh_->pmb_pack;
@@ -508,7 +507,7 @@ void RadialProfile::CalculateMagneticFlux(
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
   const auto meshblock_sizes = pack->pmb->mb_size.d_view;
   const Real dx1 = mesh_size.dx1, dx2 = mesh_size.dx2, dx3 = mesh_size.dx3;
-  const int first_parent_bin = nbins_subcell_corrected_;
+  const int nbins_subcell_corrected = nbins_subcell_corrected_;
 
   // The inside sample owns the exposed face. All positions and widths are physical.
   const auto DumpFaceToBin = KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
@@ -522,52 +521,46 @@ void RadialProfile::CalculateMagneticFlux(
     z -= lx3*round(z/lx3);
     // Sphere containment uses physical distance and ceil, independently of shell BinIndex().
     const int bin = static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr));
-    if (bin < first_parent_bin || bin >= nbins) return;
-    for (int sign = -1; sign <= 1; sign += 2) {
-      const int offset = (sign+1)/2;
+    const bool within_bin_range = nbins_subcell_corrected <= bin && bin < nbins;
+    if (!within_bin_range) return;
+    for (int side = -1; side <= 1; side += 2) {
+      const int offset = (side+1)/2;
+      const Real dx[3] = {dx1, dx2, dx3};
+      const Real normal_field[3] = {b0.x1f(m,k,j,i+offset), b0.x2f(m,k,j+offset,i),
+                                    b0.x3f(m,k+offset,j,i)};
+      const Real face_area[3] = {dx2*dx3, dx1*dx3, dx1*dx2};
+      const Real lx[3] = {lx1, lx2, lx3};
       for (int axis = 0; axis < 3; ++axis) {
-        const Real width = axis == 0 ? dx1 : (axis == 1 ? dx2 : dx3);
-        const Real normal_field = axis == 0 ? b0.x1f(m,k,j,i+offset)
-            : (axis == 1 ? b0.x2f(m,k,j+offset,i) : b0.x3f(m,k+offset,j,i));
-        const Real face_area = axis == 0 ? dx2*dx3 : (axis == 1 ? dx1*dx3 : dx1*dx2);
-        const Real position[3] = {x, y, z};
         Real neighbor[3] = {x, y, z};
-        const Real length = axis == 0 ? lx1 : (axis == 1 ? lx2 : lx3);
-        neighbor[axis] += sign*width;
-        neighbor[axis] -= length*round(neighbor[axis]/length);
-        const Real radius = bin*dr;
-        if (neighbor[0]*neighbor[0] + neighbor[1]*neighbor[1] +
-            neighbor[2]*neighbor[2] <= radius*radius) continue;
+        neighbor[axis] += side*dx[axis];
+        neighbor[axis] -= lx[axis]*round(neighbor[axis]/lx[axis]);
+        const Real rsph2 = SQR(neighbor[0]) + SQR(neighbor[1]) + SQR(neighbor[2]);
 
-        const Real outward_flux = sign*normal_field*face_area;
-        if (!Kokkos::isfinite(outward_flux)) {
-          Kokkos::printf("RadialProfile nonfinite face flux: center %d (id %llu), "
-                         "bin %d, radius %.17g\n", c,
-                         static_cast<unsigned long long>(centers(c).id), bin,
-                         static_cast<double>(bin*dr));
-          Kokkos::abort("nonfinite hemisphere face flux");
-        }
-        Real direction[3];
-        Real scale = 0.0;
-        for (int a = 0; a < 3; ++a) {
-          direction[a] = rprof(c, enclosed_field_x+a, bin);
-          scale = Kokkos::fmax(scale, Kokkos::abs(direction[a]));
-        }
-        // A zero mean has no hemisphere direction. Finalization supplies NaNs.
-        if (scale == 0.0) continue;
-        Real dot = 0.0;
-        for (int a = 0; a < 3; ++a) {
-          const Real length = a == 0 ? lx1 : (a == 1 ? lx2 : lx3);
-          Real face_position = position[a] + (a == axis ? 0.5*sign*width : 0.0);
-          face_position -= length*round(face_position/length);
-          dot += face_position*(direction[a]/scale);
-        }
+        // If the neighboring cell is inside this bin, then this face is not the "exposed"
+        // face of the discrete hemisphere.
+        if (rsph2 <= SQR(bin*dr)) continue;
+
+        const Real outward_flux = side*normal_field[axis]*face_area[axis];
+        // Determine whether this face belongs to "upper" or "lower" hemisphere
+        Real xf = x + (axis == 0 ? side*0.5*dx[0] : 0.0);
+        Real yf = y + (axis == 1 ? side*0.5*dx[1] : 0.0);
+        Real zf = z + (axis == 2 ? side*0.5*dx[2] : 0.0);
+        // TODO(SMOON) Is this really necessary? We have already wrapped the cell center position.
+        xf -= lx1*round(xf/lx1);
+        yf -= lx2*round(yf/lx2);
+        zf -= lx3*round(zf/lx3);
+        Real rdotB = (xf*rprof(c, enclosed_field_x, bin)
+                      + yf*rprof(c, enclosed_field_y, bin)
+                      + zf*rprof(c, enclosed_field_z, bin));
         auto sum = scatter.access();
-        if (dot > 0.0) {
+        if (rdotB > 0.0) {
+          // Upper hemisphere
           sum(c, 0, bin) += outward_flux;
-        } else if (dot < 0.0) {
+        } else if (rdotB < 0.0) {
+          // Lower hemisphere
           sum(c, 1, bin) -= outward_flux;
         } else {
+          // If rdotB is exactly zero, split the flux equally between the two hemispheres.
           sum(c, 0, bin) += 0.5*outward_flux;
           sum(c, 1, bin) -= 0.5*outward_flux;
         }
@@ -583,37 +576,18 @@ void RadialProfile::CalculateMagneticFlux(
   });
 
   Kokkos::Experimental::contribute(flux, scatter);
-  Kokkos::fence();  // complete face sums before MPI reads the compact buffer
 #if MPI_PARALLEL_ENABLED
-  const int status = MPI_Allreduce(MPI_IN_PLACE, flux.data(),
-      static_cast<int>(flux.size()), MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  Kokkos::fence();  // complete face sums before MPI reads the compact buffer
+  const int count = static_cast<int>(ncenter*2*nbins_);
+  const int status = MPI_Allreduce(MPI_IN_PLACE, flux.data(), count,
+                                   MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
   if (status != MPI_SUCCESS) Fail("device-buffer hemisphere flux reduction failed");
 #endif
-  par_for("finalize_hemisphere_flux", DevExeSpace(), 0, ncenter-1, 0, nbins-1,
-      KOKKOS_LAMBDA(int c, int bin) {
-    bool zero_mean = true;
-    for (int axis = 0; axis < 3; ++axis) {
-      const Real mean = rprof(c, enclosed_field_x+axis, bin);
-      if (!Kokkos::isfinite(mean)) {
-        Kokkos::printf("RadialProfile nonfinite enclosed field: center %d (id %llu), "
-                       "bin %d, radius %.17g\n", c,
-                       static_cast<unsigned long long>(centers(c).id), bin,
-                       static_cast<double>(bin*dr));
-        Kokkos::abort("nonfinite enclosed magnetic field");
-      }
-      zero_mean = zero_mean && mean == 0.0;
-    }
-    for (int hemisphere = 0; hemisphere < 2; ++hemisphere) {
-      const Real value = flux(c, hemisphere, bin);
-      if (!Kokkos::isfinite(value)) {
-        Kokkos::printf("RadialProfile nonfinite hemisphere flux: center %d (id %llu), "
-                       "bin %d, radius %.17g\n", c,
-                       static_cast<unsigned long long>(centers(c).id), bin,
-                       static_cast<double>(bin*dr));
-        Kokkos::abort("nonfinite integrated hemisphere flux");
-      }
-      rprof(c, magnetic_flux_upper+hemisphere, bin) = (bin > 0 && zero_mean)
-          ? std::numeric_limits<Real>::quiet_NaN() : value;
-    }
+  par_for("finalize_hemisphere_flux", DevExeSpace(),
+      0, ncenter-1,
+      0, 1,
+      0, nbins-1,
+      KOKKOS_LAMBDA(int c, int hemisphere, int bin) {
+    rprof(c, magnetic_flux_upper+hemisphere, bin) = flux(c, hemisphere, bin);
   });
 }
