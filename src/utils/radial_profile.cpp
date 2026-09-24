@@ -65,6 +65,13 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
   if (nbins_subcell_corrected_ < 1) Fail("At least one subcell bin is needed to avoid singularity");
   if (nsub_ < 1) Fail("nsub must be positive");
   if (nbins_subcell_corrected_ > nbins_) Fail("num_bins_subcell must be <= num_bins");
+  const Real half_box = 0.5*std::min({
+      mesh->mesh_size.x1max - mesh->mesh_size.x1min,
+      mesh->mesh_size.x2max - mesh->mesh_size.x2min,
+      mesh->mesh_size.x3max - mesh->mesh_size.x3min});
+  if (requested_rmax > half_box) {
+    Fail("rmax must not exceed half the shortest box length");
+  }
 }
 
 
