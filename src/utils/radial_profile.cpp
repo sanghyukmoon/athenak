@@ -521,27 +521,37 @@ void RadialProfile::CalculateMagneticFlux(
   const Real lx2 = mesh_size.x2max - mesh_size.x2min;
   const Real lx3 = mesh_size.x3max - mesh_size.x3min;
   const auto meshblock_sizes = pack->pmb->mb_size.d_view;
-  const Real dx = mesh_size.dx1;
+  const int nsub = nsub_;
   const int nbins_subcell_corrected = nbins_subcell_corrected_;
 
   // The inside sample owns the exposed face. All positions and widths are physical.
-  const auto DumpFaceToBin = KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
+  const auto DumpFaceToBin = KOKKOS_LAMBDA(
+      int c, int m, int k, int j, int i, int ksub, int jsub, int isub) -> void {
+    const bool is_subcell = isub >= 0;
     const auto &block_size = meshblock_sizes(m);
+    Real dx = block_size.dx1;
     const auto center = centers(c);
     Real x = CellCenterX(i-indcs.is, indcs.nx1, block_size.x1min, block_size.x1max) - center.x1;
     Real y = CellCenterX(j-indcs.js, indcs.nx2, block_size.x2min, block_size.x2max) - center.x2;
     Real z = CellCenterX(k-indcs.ks, indcs.nx3, block_size.x3min, block_size.x3max) - center.x3;
+    if (is_subcell) {
+      x += -0.5*dx + (isub + 0.5)*dx/nsub;
+      y += -0.5*dx + (jsub + 0.5)*dx/nsub;
+      z += -0.5*dx + (ksub + 0.5)*dx/nsub;
+      dx /= nsub;
+    }
     x -= lx1*round(x/lx1);
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
     // Sphere containment uses physical distance and ceil, independently of shell BinIndex().
     const int bin = static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr));
-    const bool within_bin_range = nbins_subcell_corrected <= bin && bin < nbins;
+    const bool within_bin_range = is_subcell
+        ? bin < nbins_subcell_corrected
+        : nbins_subcell_corrected <= bin && bin < nbins;
     if (!within_bin_range) return;
     for (int side = -1; side <= 1; side += 2) {
       const int offset = (side+1)/2;
-      const Real normal_field[3] = {b0.x1f(m,k,j,i+offset), b0.x2f(m,k,j+offset,i),
-                                    b0.x3f(m,k+offset,j,i)};
+
       const Real lx[3] = {lx1, lx2, lx3};
       for (int axis = 0; axis < 3; ++axis) {
         Real neighbor[3] = {x, y, z};
@@ -553,7 +563,20 @@ void RadialProfile::CalculateMagneticFlux(
         // face of the discrete hemisphere.
         if (rsph2 <= SQR(bin*dr)) continue;
 
-        const Real outward_flux = side*normal_field[axis]*SQR(dx);
+        Real normal_field;
+        if (is_subcell) {
+          const int subcell_index = axis == 0 ? isub : (axis == 1 ? jsub : ksub);
+          const Real field_left = axis == 0 ? b0.x1f(m,k,j,i)
+              : (axis == 1 ? b0.x2f(m,k,j,i) : b0.x3f(m,k,j,i));
+          const Real field_right = axis == 0 ? b0.x1f(m,k,j,i+1)
+              : (axis == 1 ? b0.x2f(m,k,j+1,i) : b0.x3f(m,k+1,j,i));
+          const Real fraction = static_cast<Real>(subcell_index + offset)/nsub;
+          normal_field = (1.0 - fraction)*field_left + fraction*field_right;
+        } else {
+          normal_field = axis == 0 ? b0.x1f(m,k,j,i+offset)
+              : (axis == 1 ? b0.x2f(m,k,j+offset,i) : b0.x3f(m,k+offset,j,i));
+        }
+        const Real outward_flux = side*normal_field*SQR(dx);
         // Determine whether this face belongs to "upper" or "lower" hemisphere
         Real xf = x + (axis == 0 ? side*0.5*dx : 0.0);
         Real yf = y + (axis == 1 ? side*0.5*dx : 0.0);
@@ -585,7 +608,14 @@ void RadialProfile::CalculateMagneticFlux(
       0, ncenter-1, 0, pack->nmb_thispack-1,
       indcs.ks, indcs.ke, indcs.js, indcs.je, indcs.is, indcs.ie,
       KOKKOS_LAMBDA(int c, int m, int k, int j, int i) {
-    DumpFaceToBin(c, m, k, j, i);
+    DumpFaceToBin(c, m, k, j, i, -1, -1, -1);
+  });
+
+  par_for("subcell_hemisphere_flux", DevExeSpace(), 0, parent_count.view_host()()-1,
+      0, nsub-1, 0, nsub-1, 0, nsub-1,
+      KOKKOS_LAMBDA(int idx, int ksub, int jsub, int isub) {
+    const auto &parent = subcell_parents(idx);
+    DumpFaceToBin(parent.c, parent.m, parent.k, parent.j, parent.i, ksub, jsub, isub);
   });
 
   Kokkos::Experimental::contribute(flux, scatter);
