@@ -511,8 +511,9 @@ void RadialProfile::CalculateMagneticFlux(
   const int first_parent_bin = nbins_subcell_corrected_;
 
   // The inside sample owns the exposed face. All positions and widths are physical.
-  const auto AddFace = KOKKOS_LAMBDA(int c, int bin, Real x, Real y, Real z,
+  const auto DumpFaceToBin = KOKKOS_LAMBDA(int c, int bin, Real x, Real y, Real z,
       int axis, int sign, Real width, Real normal_field, Real face_area) {
+    if (bin < first_parent_bin || bin >= nbins) return;
     const Real position[3] = {x, y, z};
     Real neighbor[3] = {x, y, z};
     const Real length = axis == 0 ? lx1 : (axis == 1 ? lx2 : lx3);
@@ -569,14 +570,12 @@ void RadialProfile::CalculateMagneticFlux(
     y -= lx2*round(y/lx2);
     z -= lx3*round(z/lx3);
     // Sphere containment uses physical distance and ceil, independently of shell BinIndex().
-    const int bin = Kokkos::max(first_parent_bin,
-        static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr)));
-    if (bin >= nbins) return;
+    const int bin = static_cast<int>(ceil(sqrt(x*x + y*y + z*z)/dr));
     for (int sign = -1; sign <= 1; sign += 2) {
       const int offset = (sign+1)/2;
-      AddFace(c, bin, x, y, z, 0, sign, dx1, b0.x1f(m,k,j,i+offset), dx2*dx3);
-      AddFace(c, bin, x, y, z, 1, sign, dx2, b0.x2f(m,k,j+offset,i), dx1*dx3);
-      AddFace(c, bin, x, y, z, 2, sign, dx3, b0.x3f(m,k+offset,j,i), dx1*dx2);
+      DumpFaceToBin(c, bin, x, y, z, 0, sign, dx1, b0.x1f(m,k,j,i+offset), dx2*dx3);
+      DumpFaceToBin(c, bin, x, y, z, 1, sign, dx2, b0.x2f(m,k,j+offset,i), dx1*dx3);
+      DumpFaceToBin(c, bin, x, y, z, 2, sign, dx3, b0.x3f(m,k+offset,j,i), dx1*dx2);
     }
   });
 
