@@ -21,6 +21,8 @@ struct RadialProfileCenter {
 // singularity at the origin. Outer polar-axis cells use the same subdivision to average
 // spherical projections and their moments within each cell, retaining the parent radial
 // bin and weight. The caller must ensure rmax <= (half the shortest box length).
+// The caller must synchronize b0 and bcc0 at the same epoch, including shared
+// block-boundary faces. Flux calculation performs no additional face exchange.
 // Optional gravity/MHD slots are zero when absent; a future writer omits them.
 
 class RadialProfile {
@@ -87,7 +89,9 @@ class RadialProfile {
     enclosed_field_x = 58,
     enclosed_field_y = 59,
     enclosed_field_z = 60,
-    nfields = 61
+    magnetic_flux_upper = 61,  // upper outward flux (B*length^2)
+    magnetic_flux_lower = 62,  // minus lower outward flux (B*length^2)
+    nfields = 63
   };
   // Optional fenced phase measurements. Disabled for ordinary/correctness calls.
   bool measure_time = false;
