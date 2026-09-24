@@ -21,8 +21,6 @@ struct RadialProfileCenter {
 // singularity at the origin. Outer polar-axis cells use the same subdivision to average
 // spherical projections and their moments within each cell, retaining the parent radial
 // bin and weight. The caller must ensure rmax <= (half the shortest box length).
-// The caller must synchronize b0 and bcc0 at the same epoch, including shared
-// block-boundary faces. Flux calculation performs no additional face exchange.
 // Optional gravity/MHD slots are zero when absent; a future writer omits them.
 
 class RadialProfile {
