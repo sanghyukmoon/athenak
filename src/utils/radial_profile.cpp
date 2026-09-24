@@ -54,6 +54,11 @@ void CartesianToSpherical(Real vx, Real vy, Real vz,
 }
 }  // namespace
 
+
+//----------------------------------------------------------------------------------------
+// \!fn RadialProfile::RadialProfile()
+// \brief Constructor for radial profile object.
+
 RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
                              int corrected_bins, int num_subcells)
     : mesh_(mesh),
@@ -84,8 +89,8 @@ RadialProfile::RadialProfile(Mesh *mesh, Real requested_rmax,
 
 
 //----------------------------------------------------------------------------------------
-// \!fn void RadialProfile::Compute()
-// \brief
+// \!fn DvceArray3D<Real> RadialProfile::Compute()
+// \brief Compute radial profile and return the result (ncenter, nfield, nbins)
 //
 // The volume-weighted shell-average of a quantity Q is computed as
 // <Q>_bin = sum_{ijk \in bin} Q_{ijk}*dV_{ijk} / sum_{ijk \in bin} dV_{ijk}
@@ -183,6 +188,11 @@ DvceArray3D<Real> RadialProfile::Compute(
 
   return rprof;
 }
+
+
+//----------------------------------------------------------------------------------------
+// \!fn void RadialProfile::AccumulateShells()
+// \brief Loop over the cells and accumulate fields into radial bins
 
 void RadialProfile::AccumulateShells(
     DvceArray3D<Real> &rprof,
@@ -437,6 +447,11 @@ void RadialProfile::AccumulateShells(
   Kokkos::Experimental::contribute(rprof, scatter);
 }
 
+
+//----------------------------------------------------------------------------------------
+// \!fn void RadialProfile::NormalizeProfiles()
+// \brief Properly normalize the accumulated fields to produce radial profiles.
+
 void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
   constexpr Field volume_weighted_fields[] = {density_sq, velocity_x, velocity_y,
     velocity_z, velocity_xy, velocity_xz, velocity_yz, velocity_x_sq, velocity_y_sq,
@@ -479,7 +494,11 @@ void RadialProfile::NormalizeProfiles(DvceArray3D<Real> &rprof) {
       });
 }
 
-// Calculate mean magnetic field and the magnetic flux and store the data to rprof.
+
+//----------------------------------------------------------------------------------------
+// \!fn void RadialProfile::CalculateMagneticFlux()
+// \brief Calculate mean magnetic field and the magnetic flux and store the data to rprof.
+
 void RadialProfile::CalculateMagneticFlux(
     DvceArray3D<Real> &rprof,
     const DvceArray1D<SubcellParent> &subcell_parents,
