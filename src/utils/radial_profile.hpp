@@ -21,9 +21,11 @@ struct RadialProfileCenter {
 // singularity at the origin. Outer polar-axis cells use the same subdivision to average
 // spherical projections and their moments within each cell, retaining the parent radial
 // bin and weight. The caller must ensure rmax <= (half the shortest box length).
-// Optional gravity/MHD slots are zero when absent; a future writer omits them.
+// Optional gravity/MHD slots are zero when absent; the writer omits them.
 
 class RadialProfile {
+  friend class RadialProfileOutput;
+
  public:
   enum Field {
     shell_volume = 0,
