@@ -133,7 +133,6 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
 }
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
-  rprof_center_func = DomainCenter;
   pgen_final_func = BenchmarkRadialProfile;
   if (restart) return;
   auto *pack = pmy_mesh_->pmb_pack;
