@@ -68,14 +68,14 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
 
   // check that appropriate physics is defined for requested output variable
   // TODO(@user): Index limits of variable choices below may change if more choices added
-  if ((ivar<16) && (pm->pmb_pack->phydro == nullptr)) {
+  if ((ivar<16 || ivar==154 || ivar==155) && (pm->pmb_pack->phydro == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of Hydro variable requested in <output> block '"
        << out_params.block_name << "' but no Hydro object has been constructed."
        << std::endl << "Input file is likely missing a <hydro> block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar>=16) && (ivar<50) && (pm->pmb_pack->pmhd == nullptr)) {
+  if (((ivar>=16 && ivar<50) || (ivar>=156 && ivar<=159)) && (pm->pmb_pack->pmhd == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of MHD variable requested in <output> block '"
        << out_params.block_name << "' but no MHD object has been constructed."
@@ -170,7 +170,7 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << std::endl << "Input file is likely missing corresponding block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if (ivar==153 && (pm->pmb_pack->pgrav == nullptr)) {
+  if ((ivar>=153 && ivar<=159) && (pm->pmb_pack->pgrav == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of gravity potential requested in <output> block '"
        << out_params.block_name << "' but gravity object not constructed."
@@ -184,7 +184,13 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   // make a vector of out_params.variables
   std::vector<std::string> variables;
 
-  variables.push_back(out_params.variable);
+  if (ivar>=154 && ivar<=159) {
+    // Expand locally so input metadata and default filenames keep the requested group.
+    variables.push_back(out_params.variable.substr(0, out_params.variable.size() - 4));
+    variables.push_back("grav_phi");
+  } else {
+    variables.push_back(out_params.variable);
+  }
   if (out_params.file_type == "pdf") {
     if (out_params.nbin2 > 1) {
       variables.push_back(out_params.variable_2);
@@ -620,7 +626,7 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
 
     // gravity potential
     if (variable.compare("grav_phi") == 0) {
-      outvars.emplace_back("grav_phi",0,&(pm->pmb_pack->pgrav->phi));
+      outvars.emplace_back("phi",0,&(pm->pmb_pack->pgrav->phi));
     }
 
     // ADM variables, excluding gauge

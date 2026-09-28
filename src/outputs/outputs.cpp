@@ -189,22 +189,6 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
         opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
       }
 
-      // check that pdf variables are single variables
-      // raise error if variable = mhd_w, mhd_u, hydro_w, hydro_u
-      if (opar.file_type.compare("pdf") == 0) {
-        if (opar.variable.compare("mhd_w") == 0 ||
-            opar.variable.compare("mhd_u") == 0 ||
-            opar.variable.compare("hydro_w") == 0 ||
-            opar.variable.compare("hydro_u") == 0) {
-          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "PDF output block '" << opar.block_name
-              << "' cannot output variable '" << opar.variable << "'."
-              << " The variable must be a single variable not a variable group"
-              << std::endl;
-          exit(EXIT_FAILURE);
-        }
-      }
-
       // set optional boolean to output only user-defined history variables
       if (opar.file_type.compare("hst") == 0) {
         opar.user_hist_only =pin->GetOrAddBoolean(opar.block_name,"user_hist_only",false);
@@ -270,6 +254,23 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
           opar.bin2_max = 1;
           opar.nbin2 = 0;
           opar.logscale2 = true;
+        }
+        // Each active PDF axis must select a single field.
+        std::vector<std::string> pdf_variables{opar.variable};
+        if (opar.nbin2 != 0) {pdf_variables.push_back(opar.variable_2);}
+        for (const auto &variable : pdf_variables) {
+          if (variable == "mhd_w" || variable == "mhd_u" ||
+              variable == "hydro_w" || variable == "hydro_u" ||
+              variable == "hydro_u_phi" || variable == "hydro_w_phi" ||
+              variable == "mhd_u_phi" || variable == "mhd_w_phi" ||
+              variable == "mhd_u_bcc_phi" || variable == "mhd_w_bcc_phi") {
+            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "PDF output block '" << opar.block_name
+                << "' cannot output variable '" << variable << "'."
+                << " The variable must be a single variable not a variable group"
+                << std::endl;
+            exit(EXIT_FAILURE);
+          }
         }
         pnode = new PDFOutput(pin,pm,opar);
         pout_list.insert(pout_list.begin(),pnode);
