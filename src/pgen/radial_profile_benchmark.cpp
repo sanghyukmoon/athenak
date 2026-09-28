@@ -4,11 +4,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "athena.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -28,16 +31,44 @@
 DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm) {
   const auto &size = pm->mesh_size;
   const auto &indcs = pm->mesh_indcs;
-  const std::uint64_t i = indcs.nx1/2, j = indcs.nx2/2, k = indcs.nx3/2;
-  DvceArray1D<RadialProfileCenter> centers("domain_center", 1);
-  RadialProfileCenter center = {
-    i + indcs.nx1*(j + indcs.nx2*k),
-    CellCenterX(i, indcs.nx1, size.x1min, size.x1max),
-    CellCenterX(j, indcs.nx2, size.x2min, size.x2max),
-    CellCenterX(k, indcs.nx3, size.x3min, size.x3max),
-    0.0, 0.0, 0.0  // stationary uniform benchmark
-  };
-  Kokkos::deep_copy(centers, center);
+  constexpr int num_centers = 100;
+  const std::uint64_t nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const std::uint64_t num_cells = nx1*nx2*nx3;
+  if (num_cells < num_centers) {
+    std::cerr << "### FATAL ERROR in radial_profile_benchmark: "
+              << "at least 100 active cells are required" << std::endl;
+    #if MPI_PARALLEL_ENABLED
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    #endif
+    std::exit(EXIT_FAILURE);
+  }
+
+  // Reproduce the same synthetic, uniformly distributed centers on every rank.
+  std::mt19937_64 generator(0);
+  std::uniform_int_distribution<std::uint64_t> cell_id(0, num_cells - 1);
+  std::vector<std::uint64_t> center_ids;
+  while (center_ids.size() < num_centers) {
+    const auto id = cell_id(generator);
+    if (std::find(center_ids.begin(), center_ids.end(), id) == center_ids.end()) {
+      center_ids.push_back(id);
+    }
+  }
+  std::sort(center_ids.begin(), center_ids.end());
+
+  DvceArray1D<RadialProfileCenter> centers("domain_centers", num_centers);
+  auto host_centers = Kokkos::create_mirror_view(centers);
+  for (int n = 0; n < num_centers; ++n) {
+    const auto id = center_ids[n];
+    const std::uint64_t i = id%nx1, j = (id/nx1)%nx2, k = id/(nx1*nx2);
+    host_centers(n) = {
+      id,
+      CellCenterX(i, indcs.nx1, size.x1min, size.x1max),
+      CellCenterX(j, indcs.nx2, size.x2min, size.x2max),
+      CellCenterX(k, indcs.nx3, size.x3min, size.x3max),
+      0.0, 0.0, 0.0  // stationary uniform benchmark
+    };
+  }
+  Kokkos::deep_copy(centers, host_centers);
   return centers;
 }
 
@@ -50,11 +81,12 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   RadialProfile radial_profile(pm, rmax, nbins_subcell_corrected, nsub);
   radial_profile.measure_time = true;
   const auto centers = DomainCenter(pm);
+  const int num_centers = centers.extent(0);
   Kokkos::fence();
 
   RadialProfile::Timings total_timings;
 
-  // Measure 100 successive single-center calculations, including per-call allocations.
+  // Repeat the fixed 100-center batch, including allocations and MPI on every call.
   #if MPI_PARALLEL_ENABLED
   MPI_Barrier(MPI_COMM_WORLD);
   #endif
@@ -76,16 +108,22 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   MPI_Allreduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
                 MPI_MAX, MPI_COMM_WORLD);
   #endif
-  std::uint64_t zonecycles = static_cast<uint64_t>(pm->nmb_total) * num_repeats *
-                             pm->NumberOfMeshBlockCells();
-  double zcps = static_cast<double>(zonecycles) / max_elapsed;
+  const auto &indcs = pm->mesh_indcs;
+  const std::uint64_t num_cells = static_cast<std::uint64_t>(indcs.nx1) *
+                                  indcs.nx2 * indcs.nx3;
+  const double seconds_per_batch = max_elapsed/num_repeats;
+  const double seconds_per_center = seconds_per_batch/num_centers;
+  const double zcps = static_cast<double>(num_cells)/seconds_per_center;
 
   if (global_variable::my_rank == 0) {
     std::cout << "RadialProfile performance... " << std::endl;
-    std::cout << "cpu time used  = " << max_elapsed << std::endl;
+    std::cout << "centers = " << num_centers << " repeats = " << num_repeats << std::endl;
+    std::cout << "total elapsed time (seconds) = " << max_elapsed << std::endl;
+    std::cout << "average seconds per batch = " << seconds_per_batch << std::endl;
+    std::cout << "average seconds per center = " << seconds_per_center << std::endl;
     std::cout << "zone-cycles/cpu_second = " << zcps << std::endl;
     const auto &t = total_timings;
-    std::cout << "Rank 0 timings (seconds per calculation): allocation=" << t.allocation/num_repeats
+    std::cout << "Rank 0 timings (seconds per 100-center calculation): allocation=" << t.allocation/num_repeats
               << " accumulation=" << t.accumulation/num_repeats
               << " normalization=" << t.normalization/num_repeats
               << " reduction=" << t.reduction/num_repeats
