@@ -389,6 +389,18 @@ class RestartOutput : public BaseTypeOutput {
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
 };
 
+// Full-domain, native-resolution projections along all three Cartesian axes.
+class ProjectionOutput : public BaseTypeOutput {
+ public:
+  ProjectionOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
+  void LoadOutputData(Mesh *pm) override {}
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+
+ private:
+  void CalculateProjection(Mesh *pm, int axis);
+  DvceArray3D<double> image;  // [field, slow, fast], reused for each viewing axis
+};
+
 // Forward declaration
 class CartesianGrid;
 
