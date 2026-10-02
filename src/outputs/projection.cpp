@@ -61,19 +61,19 @@ void ProjectionOutput::CalculateProjection(Mesh *pm, int axis) {
   int counts[3] = {pm->mesh_indcs.nx1, pm->mesh_indcs.nx2, pm->mesh_indcs.nx3};
   int block_counts[3] = {pm->mb_indcs.nx1, pm->mb_indcs.nx2, pm->mb_indcs.nx3};
   int starts[3] = {pm->mb_indcs.is, pm->mb_indcs.js, pm->mb_indcs.ks};
-  double lengths[3] = {pm->mesh_size.x1max - pm->mesh_size.x1min,
+  Real lengths[3] = {pm->mesh_size.x1max - pm->mesh_size.x1min,
                        pm->mesh_size.x2max - pm->mesh_size.x2min,
                        pm->mesh_size.x3max - pm->mesh_size.x3min};
   int nfast = counts[fast_axis], nslow = counts[slow_axis];
   int block_fast = block_counts[fast_axis], block_slow = block_counts[slow_axis];
   int nline = block_counts[axis];
   int is = starts[0], js = starts[1], ks = starts[2];
-  double dl = lengths[axis]/counts[axis];
+  Real dl = lengths[axis]/counts[axis];
 
   // Release the previous axis before allocation to avoid keeping two image buffers.
   if (image.extent(1) != nslow || image.extent(2) != nfast) {
-    image = DvceArray3D<double>();
-    image = DvceArray3D<double>("projection", nfield, nslow, nfast);
+    image = DvceArray3D<Real>();
+    image = DvceArray3D<Real>("projection", nfield, nslow, nfast);
   }
   Kokkos::deep_copy(image, 0.0);
   auto sums = image;
@@ -94,16 +94,16 @@ void ProjectionOutput::CalculateProjection(Mesh *pm, int axis) {
   par_for("projection_sum", DevExeSpace(), 0, pack->nmb_thispack-1,
           0, block_slow-1, 0, block_fast-1,
     KOKKOS_LAMBDA(int m, int slow, int fast) {
-      double column[7] = {};
+      Real column[7] = {};
       for (int line=0; line<nline; ++line) {
         int i = is + (axis == 0 ? line : fast);
         int j = js + (axis == 0 ? fast : (axis == 1 ? line : slow));
         int k = ks + (axis == 2 ? line : slow);
-        double rho = static_cast<double>(u(m,IDN,k,j,i));
+        Real rho = u(m,IDN,k,j,i);
         column[0] += rho*dl;
         for (int c=0; c<3; ++c) {
-          column[1+c] += static_cast<double>(u(m,IM1+c,k,j,i))*dl;
-          if (mhd) column[4+c] += rho*static_cast<double>(bcc(m,c,k,j,i))*dl;
+          column[1+c] += u(m,IM1+c,k,j,i)*dl;
+          if (mhd) column[4+c] += rho*bcc(m,c,k,j,i)*dl;
         }
       }
       int global_fast = pixel_offset(m,0) + fast;
@@ -117,7 +117,7 @@ void ProjectionOutput::CalculateProjection(Mesh *pm, int axis) {
   for (std::size_t offset=0; offset<image.size();) {
     int count = static_cast<int>(std::min(image.size()-offset,
                                         static_cast<std::size_t>(INT_MAX)));
-    MPI_Allreduce(MPI_IN_PLACE, image.data()+offset, count, MPI_DOUBLE, MPI_SUM,
+    MPI_Allreduce(MPI_IN_PLACE, image.data()+offset, count, MPI_ATHENA_REAL, MPI_SUM,
                   MPI_COMM_WORLD);
     offset += count;
   }
@@ -136,7 +136,7 @@ void ProjectionOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   int nfield = pm->pmb_pack->pmhd == nullptr ? 4 : 7;
   if (global_variable::my_rank == 0) {
     std::ostringstream filename;
-    filename << "proj/" << out_params.file_basename << '.' << out_params.file_id << '.'
+    filename << "proj/" << out_params.file_basename << '.'
              << std::setw(5) << std::setfill('0') << out_params.file_number << ".proj";
     projfile.Open(filename.str().c_str(), IOWrapper::FileMode::write, true);
     std::uint16_t endian = 1;
@@ -150,7 +150,7 @@ void ProjectionOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
            << "  time=" << pm->time << '\n'
            << "  cycle=" << pm->ncycle << '\n'
            << "  output number=" << out_params.file_number << '\n'
-           << "  size of variable=8\n"
+           << "  size of variable=" << sizeof(Real) << '\n'
            << "  byte order=" << byte_order << '\n'
            << "  number of axes=3\n"
            << "  root grid size=" << pm->mesh_indcs.nx1 << ' ' << pm->mesh_indcs.nx2
@@ -177,7 +177,7 @@ void ProjectionOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       auto host_image = Kokkos::create_mirror_view_and_copy(HostMemSpace(), image);
       std::size_t pixels = image.extent(1)*image.extent(2);
       for (int f=0; f<nfield; ++f) {
-        projfile.Write_any_type(host_image.data()+f*pixels, pixels, "double", true);
+        projfile.Write_any_type(host_image.data()+f*pixels, pixels, "Real", true);
       }
     }
   }

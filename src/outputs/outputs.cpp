@@ -91,15 +91,11 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
       // but only for those output types that use them
       if (opar.file_type.compare("hst") != 0 &&
           opar.file_type.compare("rst") != 0 &&
-          opar.file_type.compare("proj") != 0 &&
           opar.file_type.compare("log") != 0 &&
-          opar.file_type.compare("trk") != 0) {
-        opar.variable = pin->GetString(opar.block_name, "variable");
+          opar.file_type.compare("trk") != 0 &&
+          opar.file_type.compare("proj") != 0) {
+        opar.variable = pin->GetString(opar.block_name,"variable");
         opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
-      }
-
-      if (opar.file_type == "proj") {
-        opar.file_id = pin->GetOrAddString(opar.block_name, "id", "proj");
       }
 
       // read ghost cell option
@@ -187,10 +183,12 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
       // set output variable and optional file id (default is output variable name)
       if (opar.file_type.compare("hst") != 0 &&
           opar.file_type.compare("rst") != 0 &&
-          opar.file_type.compare("proj") != 0 &&
           opar.file_type.compare("log") != 0) {
-        opar.variable = pin->GetString(opar.block_name, "variable");
-        opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
+        if (opar.file_type != "proj") {
+          opar.variable = pin->GetString(opar.block_name, "variable");
+        }
+        opar.file_id = pin->GetOrAddString(opar.block_name,"id",
+            opar.file_type == "proj" ? opar.file_type : opar.variable);
       }
 
       // check that pdf variables are single variables
