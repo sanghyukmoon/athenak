@@ -621,6 +621,10 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
     if (variable.compare("grav_phi") == 0) {
       outvars.emplace_back("grav_phi",0,&(pm->pmb_pack->pgrav->phi));
     }
+    if ((variable.compare("hydro_u") == 0 || variable.compare("mhd_u_bcc") == 0) &&
+        pm->pmb_pack->pgrav != nullptr) {
+      outvars.emplace_back("phi",0,&(pm->pmb_pack->pgrav->phi));
+    }
 
     // ADM variables, excluding gauge
     for (int v = 0; v < adm::ADM::nadm - 4; ++v) {
