@@ -19,6 +19,7 @@
 #include "bvals/bvals.hpp"
 
 // forward declarations
+class ParticleHistoryOutput;
 
 // constants that enumerate ParticlesPusher options
 enum class ParticlesPusher {drift, leapfrog, rk3, lagrangian_tracer, lagrangian_mc};
@@ -84,6 +85,7 @@ class ParticleMesh;
 class Particles {
   friend class ParticlesBoundaryValues;
  public:
+  ParticleHistoryOutput *phistory = nullptr;
   Particles(MeshBlockPack *ppack, ParameterInput *pin);
   ~Particles();
 

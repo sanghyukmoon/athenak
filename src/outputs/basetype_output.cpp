@@ -50,6 +50,8 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       out_params.file_type.compare("rprof") == 0 ||
       out_params.file_type.compare("log") == 0 ||
       out_params.file_type.compare("trk") == 0 ||
+      out_params.file_type.compare("parbin") == 0 ||
+      out_params.file_type.compare("parhst") == 0 ||
       out_params.file_type.compare("proj") == 0) {return;}
 
   // initialize vector containing number of output MBs per rank

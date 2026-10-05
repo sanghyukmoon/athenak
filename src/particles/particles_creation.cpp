@@ -41,6 +41,7 @@
 #include "eos/eos.hpp"
 #include "gravity/gravity.hpp"
 #include "particles.hpp"
+#include "outputs/outputs.hpp"
 #include "sink_convergence.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -276,6 +277,10 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   });
 
   nprtcl_thispack = npart_new;
+  if (phistory != nullptr) {
+    Mesh *pm = pmy_pack->pmesh;
+    phistory->WriteParticles(pm, npart, nkeep, pm->time + pm->dt, pm->ncycle + 1);
+  }
   // creation changed the particle count, so refresh the Mesh's global bookkeeping
   // (nprtcl_total / nprtcl_eachrank) that the outputs read. Collective; every rank
   // reaches it because ncreated_global > 0 here implies it on all ranks.

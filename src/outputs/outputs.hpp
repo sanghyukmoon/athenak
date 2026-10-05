@@ -403,6 +403,22 @@ class RestartOutput : public BaseTypeOutput {
   void WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final);
 };
 
+//! \brief Native sink-particle snapshots and individual histories.
+class ParticleBinaryOutput : public BaseTypeOutput {
+ public:
+  ParticleBinaryOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
+  void LoadOutputData(Mesh *pm) override {}
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+};
+
+class ParticleHistoryOutput : public BaseTypeOutput {
+ public:
+  ParticleHistoryOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
+  void LoadOutputData(Mesh *pm) override {}
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+  void WriteParticles(Mesh *pm, int first, int count, Real time, int cycle);
+};
+
 //! \brief Full-domain projections along all three Cartesian axes.
 class ProjectionOutput : public BaseTypeOutput {
  public:
