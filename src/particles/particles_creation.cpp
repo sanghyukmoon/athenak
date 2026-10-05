@@ -199,7 +199,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   // summed their masses, and every rank wrote the sum back onto its own copy, doubling
   // the sink mass EVERY cycle (observed: 9.8 -> 1e72 over ~230 cycles).
   // Fix: number this step's new sinks from a global base. Each rank takes the block
-  // [created_total_ + offset, ... + nkeep), where offset is the exclusive prefix sum of
+  // [1 + created_total_ + offset, ... + nkeep), where offset is the exclusive prefix sum of
   // nkeep over lower ranks, and every rank then advances created_total_ by the GLOBAL
   // total so the counters never drift apart and no later step can collide either.
   // The collective is unconditional -- it must be reached even by ranks creating
@@ -215,7 +215,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
     for (int r = 0; r < global_variable::nranks; ++r) ncreated_global += nk[r];
   }
 #endif
-  const int tag0 = 1000000 + created_total_ + tag_offset;
+  const int tag0 = 1 + created_total_ + tag_offset;
   created_total_ += ncreated_global;
 
   if (nkeep <= 0) {

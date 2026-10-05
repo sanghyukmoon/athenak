@@ -29,7 +29,7 @@
 //! deliberately replaces
 //! the previous scheme, which placed each record at an offset derived from its tag and so
 //! silently assumed tags ran 0..(nparticles-1) with no gaps. Created sinks are numbered
-//! from a global base of 1000000 (see Particles::CreateSinks), so under that assumption
+//! from a global base of 1 (see Particles::CreateSinks), so under that assumption
 //! they were either written megabytes into the file or, because selection also tested
 //! `tag < nparticles`, skipped entirely -- which is why this output was unusable for any
 //! run whose sinks were created rather than seeded.
