@@ -15,16 +15,20 @@
 #include <random>
 #include <vector>
 #include <iostream> // cout
+#include <iomanip>
+#include <limits>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "mesh/mesh.hpp"
+#include "driver/driver.hpp"
 #include "eos/eos.hpp"
 #include "globals.hpp"
 #include "gravity/gravity.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "particles/particles.hpp"
 #include "pgen.hpp"
 #include "utils/radial_profile.hpp"
 
@@ -33,6 +37,38 @@
 #endif
 
 namespace {
+Real sfe_term;
+Real initial_gas_mass;
+
+void CheckSFE(Mesh *pm) {
+  Real sink_mass = 0.0;
+  auto *ppart = pm->pmb_pack->ppart;
+  if (ppart != nullptr) {
+    const auto rdata = ppart->prtcl_rdata;
+    Kokkos::parallel_reduce("gmtf_sink_mass",
+        Kokkos::RangePolicy<DevExeSpace>(0, ppart->nprtcl_thispack),
+        KOKKOS_LAMBDA(const int p, Real &mass) {
+      mass += rdata(IPM, p);
+    }, sink_mass);
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &sink_mass, 1, MPI_ATHENA_REAL, MPI_SUM,
+                MPI_COMM_WORLD);
+#endif
+  const Real sfe = sink_mass/initial_gas_mass;
+  if (sfe >= sfe_term) {
+    pm->pmy_driver->tlim = pm->time;
+    if (global_variable::my_rank == 0) {
+      const auto precision = std::cout.precision();
+      std::cout << std::setprecision(std::numeric_limits<Real>::max_digits10)
+                << "SFE stopping: sfe=" << sfe << " threshold=" << sfe_term
+                << " sink_mass=" << sink_mass << " initial_gas_mass=" << initial_gas_mass
+                << " time=" << pm->time << " cycle=" << pm->ncycle << std::endl;
+      std::cout.precision(precision);
+    }
+  }
+}
+
 DvceArray1D<RadialProfileCenter> FindPotentialMinima(Mesh *pm) {
   // GMTF starts at uniform density; roundoff in the initial potential is not structure.
   if (pm->ncycle == 0) {
@@ -148,6 +184,12 @@ DvceArray1D<RadialProfileCenter> FindPotentialMinima(Mesh *pm) {
 //========================================================================================
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   rprof_center_func = FindPotentialMinima;
+  sfe_term = pin->GetOrAddReal("problem", "sfe_term", -1.0);
+  const auto &mesh_size = pmy_mesh_->mesh_size;
+  initial_gas_mass = (mesh_size.x1max-mesh_size.x1min)*
+                     (mesh_size.x2max-mesh_size.x2min)*
+                     (mesh_size.x3max-mesh_size.x3min);  // GMTF initializes rho = 1.
+  if (sfe_term > 0.0) user_work_in_loop_func = CheckSFE;
   if (restart) return;
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
