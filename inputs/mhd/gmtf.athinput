@@ -89,6 +89,16 @@ full_multigrid = true
 <mhd_srcterms>
 self_gravity = true
 
+<particles>
+type                = sink
+pusher              = leapfrog
+ppc                 = 0.0       # Start with no sinks; create them during collapse.
+sink_setup          = tigris
+accretion           = true
+creation            = true
+merging             = true
+accrete_old_position = false    # Accrete at the current position only.
+
 <problem>
 Mach       = 10       # 3D Mach number of initial turbulence
 mu_phi     = 2
