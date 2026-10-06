@@ -15,10 +15,22 @@ variable    = mhd_u_bcc
 dt          = 0.2
 
 <output3>
+file_type   = proj
+dt          = 0.002
+
+<output4>
 file_type   = rprof
 dt          = 0.0005
 
-<output4>
+<output5>
+file_type   = parbin
+dt          = 0.0005
+
+<output6>
+file_type   = parhst
+dt          = 0.0005
+
+<output7>
 file_type   = rst
 dt          = 999
 
