@@ -127,12 +127,12 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
 
   int nout_vars = outvars.size();
   int nout_mbs = outmbs.size();
-  int cells = 0;
+  std::size_t cells = 0;
   if (nout_mbs > 0) {
     int nout1 = outmbs[0].oie - outmbs[0].ois + 1;
     int nout2 = outmbs[0].oje - outmbs[0].ojs + 1;
     int nout3 = outmbs[0].oke - outmbs[0].oks + 1;
-    cells = nout1*nout2*nout3;
+    cells = static_cast<std::size_t>(nout1)*nout2*nout3;
   }
 
   // ois, oie, ojs, oje, oks, oke + il1, il2, il3, level +
@@ -217,7 +217,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     // output variables
     float tmp_data;
     for (int n=0; n<nout_vars; n++) {
-      int cnt=0;
+      std::size_t cnt=0;
       for (int k=oks; k<=oke; k++) {
         for (int j=ojs; j<=oje; j++) {
           for (int i=ois; i<=oie; i++) {
@@ -253,48 +253,48 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       }
     }
   } else {
-    // check if elements larger than 2^31
-    if (data_size*nb_mbs<=2147483648) {
-      // now write binary data in parallel
-      std::size_t myoffset = header_offset;
-      if (!single_file_per_rank) {
-        myoffset += data_size*ns_mbs;
+    const std::size_t chunk_size = std::numeric_limits<int>::max();
+    int max_nb_mbs = *std::max_element(pm->nmb_eachrank,
+                                    pm->nmb_eachrank + global_variable::nranks);
+    std::size_t myoffset = header_offset;
+    if (!single_file_per_rank) {
+      myoffset += data_size*ns_mbs;
+    }
+
+    // All ranks must choose the same collective write path.
+    if (data_size*max_nb_mbs <= chunk_size) {
+      std::size_t written = binfile.Write_any_type_at_all(data,data_size*nb_mbs,myoffset,
+                                                         "byte",single_file_per_rank);
+      if (written != data_size*nb_mbs) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "binary data write expected " << data_size*nb_mbs
+                  << " bytes, but wrote " << written << "." << std::endl;
+#if MPI_PARALLEL_ENABLED
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+        exit(EXIT_FAILURE);
       }
-      binfile.Write_any_type_at_all(data,(data_size*nb_mbs),myoffset,"byte",
-                                    single_file_per_rank);
     } else {
-      // write data over each MeshBlock sequentially and in parallel
-      // calculate max/min number of MeshBlocks across all ranks
-      noutmbs_max = pm->nmb_eachrank[0];
-      noutmbs_min = pm->nmb_eachrank[0];
-      for (int i=0; i<(global_variable::nranks); ++i) {
-        noutmbs_max = std::max(noutmbs_max,pm->nmb_eachrank[i]);
-        noutmbs_min = std::min(noutmbs_min,pm->nmb_eachrank[i]);
-      }
-      for (int m=0;  m<noutmbs_max; ++m) {
-        char *pdata=&(data[m*data_size]);
-        std::size_t myoffset = header_offset + data_size*m;
-        if (!single_file_per_rank) {
-          myoffset += data_size*ns_mbs;
+      // Match collective calls even after a rank has finished its buffer.
+      for (std::size_t pos=0; pos<data_size*max_nb_mbs; pos+=chunk_size) {
+        std::size_t count = 0;
+        char *pdata = data;
+        std::size_t offset = myoffset;
+        if (pos < data_size*nb_mbs) {
+          count = std::min(chunk_size, data_size*nb_mbs - pos);
+          pdata += pos;
+          offset += pos;
         }
-        // every rank has a MB to write, so write collectively
-        if (m < noutmbs_min) {
-          if (binfile.Write_any_type_at_all(pdata,(data_size),myoffset,"byte",
-                                              single_file_per_rank) != data_size) {
-            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "binary data not written correctly to binary file, "
-                << "binary file is broken." << std::endl;
-            exit(EXIT_FAILURE);
-          }
-        // some ranks are finished writing, so use non-collective write
-        } else if (m < pm->nmb_thisrank) {
-          if (binfile.Write_any_type_at(pdata,(data_size),myoffset,"byte",
-                                          single_file_per_rank) != data_size) {
-            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                 << std::endl << "binary data not written correctly to binary file, "
-                 << "binary file is broken." << std::endl;
-            exit(EXIT_FAILURE);
-          }
+        std::size_t written = binfile.Write_any_type_at_all(pdata,count,offset,
+                                                           "byte",single_file_per_rank);
+        if (written != count) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "binary data write expected " << count
+                    << " bytes, but wrote " << written << "." << std::endl;
+#if MPI_PARALLEL_ENABLED
+          MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+          exit(EXIT_FAILURE);
         }
       }
     }
