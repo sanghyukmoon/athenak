@@ -36,8 +36,8 @@ void ParticleHistoryOutput::WriteParticles(Mesh *pm, int first, int count,
   auto range = std::make_pair(first, first + count);
   auto ids = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
       Kokkos::subview(pp->prtcl_idata, static_cast<int>(PTAG), range));
-  auto state = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
-      Kokkos::subview(pp->prtcl_rdata, Kokkos::ALL, range));
+  // Copy before selecting particles: a partial real-state slice is noncontiguous.
+  auto state = Kokkos::create_mirror_view_and_copy(HostMemSpace(), pp->prtcl_rdata);
   const int fields[7] = {IPM, IPX, IPY, IPZ, IPVX, IPVY, IPVZ};
   const int precision = std::numeric_limits<Real>::max_digits10;
   for (int p=0; p<count; ++p) {
@@ -54,7 +54,7 @@ void ParticleHistoryOutput::WriteParticles(Mesh *pm, int first, int count,
     }
     std::fprintf(file, "%.*g,%d,%d", precision, static_cast<double>(time), cycle, ids(p));
     for (int v=0; v<7; ++v) {
-      std::fprintf(file, ",%.*g", precision, static_cast<double>(state(fields[v], p)));
+      std::fprintf(file, ",%.*g", precision, static_cast<double>(state(fields[v], first + p)));
     }
     std::fprintf(file, "\n");
     std::fclose(file);
