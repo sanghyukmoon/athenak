@@ -387,6 +387,7 @@ class RestartOutput : public BaseTypeOutput {
   RestartOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
   void LoadOutputData(Mesh *pm) override;
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final);
 };
 
 // Forward declaration

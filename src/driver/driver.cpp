@@ -611,10 +611,9 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         // compare at floating point (32-bit) precision to reduce effect of round off
         float time_32 = static_cast<float>(pmesh->time);
         float next_32 = static_cast<float>(out->out_params.last_time+out->out_params.dt);
-        float tlim_32 = static_cast<float>(tlim);
         int &dcycle_ = out->out_params.dcycle;
 
-        if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
+        if (((out->out_params.dt > 0.0) && (time_32 >= next_32)) ||
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
           out->LoadOutputData(pmesh);
           out->WriteOutputFile(pmesh, pin);
@@ -642,11 +641,12 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
 //!  and printing diagnostic messages
 
 void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
-  // cycle through output Types and load data / write files
-  //  This design allows for asynchronous outputs to implemented in the future.
+  // Write a final checkpoint without advancing the output schedule.
   for (auto &out : pout->pout_list) {
-    out->LoadOutputData(pmesh);
-    out->WriteOutputFile(pmesh, pin);
+    if (out->out_params.file_type == "rst") {
+      out->LoadOutputData(pmesh);
+      static_cast<RestartOutput *>(out)->WriteOutputFile(pmesh, pin, true);
+    }
   }
 
   // call any problem specific functions to do work after main loop
