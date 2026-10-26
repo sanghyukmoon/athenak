@@ -79,6 +79,7 @@ class MeshBlock;
 class MeshBlockPack;
 class MeshBlockTree;
 class Mesh;
+class Driver;
 
 #include "parameter_input.hpp"
 #include "meshblock.hpp"
@@ -102,6 +103,7 @@ class Mesh {
   friend class ShearingBox;
 
  public:
+  Driver *pmy_driver = nullptr;  // allows problem callbacks to set the stopping time
   explicit Mesh(ParameterInput *pin);
   ~Mesh();
 

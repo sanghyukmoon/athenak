@@ -80,6 +80,7 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
   nmb_updated_(0),
   npart_updated_(0),
   lb_efficiency_(0) {
+  pmesh->pmy_driver = this;
   // set time-evolution option (no default)
   {
     std::string evolution_t = pin->GetString("time","evolution");
