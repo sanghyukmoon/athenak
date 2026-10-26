@@ -28,6 +28,7 @@
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
 #include "utils/utils.hpp"
+#include "particles/particles.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -563,9 +564,13 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
       for (int stage=1; stage<=(nexp_stages); ++stage) {
         ExecuteTaskList(pmesh, "before_stagen", stage);
         // solve gravity at each RK stage so the potential is consistent
-        // with the current density (required for 2nd-order accuracy)
-        if (pmesh->pmb_pack->pgrav != nullptr)
-            {pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);}
+        // with the current density (required for 2nd-order accuracy).
+        // AssembleSource() sums the registered contributions (gas, particles, ...)
+        // into pgrav->rho first, so the solver only consumes that field.
+        if (pmesh->pmb_pack->pgrav != nullptr) {
+          pmesh->pmb_pack->pgrav->AssembleSource();
+          pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);
+        }
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
       }
@@ -641,6 +646,23 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
 //!  and printing diagnostic messages
 
 void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
+  // Refresh particle->MeshBlock ownership (PGID) before the final output. The per-cycle
+  // SetGIDFromPosition runs at the TOP of each cycle (before_timeintegrator), so it fixes
+  // PGIDs left stale by the PREVIOUS cycle's end-of-cycle AMR regrid. After the LAST
+  // cycle there is no next cycle, so the final regrid's renumbering is never reconciled
+  // and the particle positions/PGIDs seen here are stale -- particle-mesh deposits (e.g.
+  // the prtcl_d output) would then bin sinks into the wrong/out-of-range block and
+  // silently drop them (or, unguarded, fault). Re-derive PGID from position once more
+  // here. ReconcileOwnership also completes the cross-rank migration this can imply (the
+  // final regrid may have handed a particle's block to another rank), so the output below
+  // sees every particle on the rank that owns its block. All ranks call it (MPI
+  // collectives).
+  if (pmesh->pmb_pack->ppart != nullptr) {
+    pmesh->pmb_pack->ppart->ReconcileOwnership(this, nexp_stages);
+    // host/MPI phase breakdown, when SINK_TIMERS is set (no-op otherwise)
+    pmesh->pmb_pack->ppart->ReportSinkTimers(pwall_clock_->seconds());
+  }
+
   // Write a final checkpoint without advancing the output schedule.
   for (auto &out : pout->pout_list) {
     if (out->out_params.file_type == "rst") {
