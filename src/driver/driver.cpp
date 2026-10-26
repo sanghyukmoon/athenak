@@ -612,6 +612,10 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
             static_cast<float>(pmesh->nmb_total);
       }
 
+      if (pmesh->pgen->user_work_in_loop_func != nullptr) {
+        pmesh->pgen->user_work_in_loop_func(pmesh);
+      }
+
       // Test for/make outputs
       for (auto &out : pout->pout_list) {
         // compare at floating point (32-bit) precision to reduce effect of round off

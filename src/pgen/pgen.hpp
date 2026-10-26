@@ -17,6 +17,7 @@
 #include "utils/radial_profile.hpp"
 
 using ProblemFinalizeFnPtr = void (*)(ParameterInput *pin, Mesh *pm);
+using UserWorkInLoopFnPtr = void (*)(Mesh *pm);
 using RadialProfileCenterFnPtr = DvceArray1D<RadialProfileCenter> (*)(Mesh *pm);
 using UserBoundaryFnPtr = void (*)(Mesh* pm);
 using UserSrctermFnPtr = void (*)(Mesh* pm, const Real bdt);
@@ -50,6 +51,8 @@ class ProblemGenerator {
   // function pointer for final work after main loop (e.g. compute errors).  Called by
   // Driver::Finalize()
   ProblemFinalizeFnPtr pgen_final_func=nullptr;
+  // function pointer for user work after each completed timestep.
+  UserWorkInLoopFnPtr user_work_in_loop_func = nullptr;
   // function pointer for providing the radial profile centers.
   RadialProfileCenterFnPtr rprof_center_func = nullptr;
   // function pointer for user-enrolled BCs.  Called in ApplyPhysicalBCs in task list
