@@ -407,6 +407,20 @@ class RestartOutput : public BaseTypeOutput {
   void WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final);
 };
 
+//! \brief Full-domain projections along all three Cartesian axes.
+class ProjectionOutput : public BaseTypeOutput {
+ public:
+  ProjectionOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
+  void LoadOutputData(Mesh *pm) override {}
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+
+  // NVCC extended device lambdas require a public enclosing member function.
+  void CalculateProjection(Mesh *pm, int axis);
+
+ private:
+  DvceArray3D<Real> image;  // [field, slow, fast], reused for each viewing axis
+};
+
 // Forward declaration
 class CartesianGrid;
 

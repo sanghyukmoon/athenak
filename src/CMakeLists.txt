@@ -118,6 +118,7 @@ add_executable(
         outputs/cartgrid.cpp
         outputs/derived_variables.cpp
         outputs/radial_profile.cpp
+        outputs/projection.cpp
         outputs/binary.cpp
         outputs/eventlog.cpp
         outputs/formatted_table.cpp

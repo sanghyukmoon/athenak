@@ -93,8 +93,9 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
           opar.file_type.compare("rst") != 0 &&
           opar.file_type.compare("rprof") != 0 &&
           opar.file_type.compare("log") != 0 &&
-          opar.file_type.compare("trk") != 0) {
-        opar.variable = pin->GetString(opar.block_name, "variable");
+          opar.file_type.compare("trk") != 0 &&
+          opar.file_type.compare("proj") != 0) {
+        opar.variable = pin->GetString(opar.block_name,"variable");
         opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
       }
 
@@ -185,8 +186,11 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
           opar.file_type.compare("rst") != 0 &&
           opar.file_type.compare("rprof") != 0 &&
           opar.file_type.compare("log") != 0) {
-        opar.variable = pin->GetString(opar.block_name, "variable");
-        opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
+        if (opar.file_type != "proj") {
+          opar.variable = pin->GetString(opar.block_name, "variable");
+        }
+        opar.file_id = pin->GetOrAddString(opar.block_name,"id",
+            opar.file_type == "proj" ? opar.file_type : opar.variable);
       }
 
       // check that pdf variables are single variables
@@ -280,6 +284,9 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
         opar.single_file_per_rank = pin->GetOrAddBoolean(opar.block_name,
           "single_file_per_rank", false);
         pnode = new MeshBinaryOutput(pin,pm,opar);
+        pout_list.insert(pout_list.begin(),pnode);
+      } else if (opar.file_type.compare("proj") == 0) {
+        pnode = new ProjectionOutput(pin,pm,opar);
         pout_list.insert(pout_list.begin(),pnode);
       } else if (opar.file_type.compare("cart") == 0) {
         pnode = new CartesianGridOutput(pin,pm,opar);

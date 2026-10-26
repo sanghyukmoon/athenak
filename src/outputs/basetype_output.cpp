@@ -49,7 +49,8 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       out_params.file_type.compare("rst") == 0 ||
       out_params.file_type.compare("rprof") == 0 ||
       out_params.file_type.compare("log") == 0 ||
-      out_params.file_type.compare("trk") == 0) {return;}
+      out_params.file_type.compare("trk") == 0 ||
+      out_params.file_type.compare("proj") == 0) {return;}
 
   // initialize vector containing number of output MBs per rank
   noutmbs.assign(global_variable::nranks, 0);
