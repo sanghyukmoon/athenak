@@ -123,11 +123,6 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.recvp  = tl["stagen"]->AddTask(&Particles::RecvP, this, id.sendp);
     id.crecv  = tl["stagen"]->AddTask(&Particles::ClearRecv, this, id.recvp);
     id.csend  = tl["stagen"]->AddTask(&Particles::ClearSend, this, id.crecv);
-    // Refresh the particle timestep every cycle from the end-of-cycle velocities
-    // (dtnew was previously seeded once at t=0 by the pgens -- a latent bug once
-    // particle speeds grow, e.g. under accretion). After the migration chain, so
-    // arrivals contribute on their new rank.
-    id.newdt  = tl["stagen"]->AddTask(&Particles::NewTimeStep, this, id.csend);
 
     // operator-split sink physics at the last RK stage, ordered create -> merge ->
     // accrete. Each stage is opt-in and chained onto the previous one so it runs only
@@ -166,7 +161,9 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     }
     if (accretion) {
       id.accrete = tl["after_stagen"]->AddTask(&Particles::AccreteMass, this, dep);
+      dep = id.accrete;
     }
+    id.newdt = tl["after_stagen"]->AddTask(&Particles::NewTimeStep, this, dep);
   } else {
     // Tracer / cosmic-ray (drift) particles: integrated once per cycle in the
     // "before_timeintegrator" task list (no gravity coupling).
