@@ -392,7 +392,12 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         }
 
         if (!SinkConverging(u0, m, ic, jc, kc, pr(IPVX,p), pr(IPVY,p),
-                            pr(IPVZ,p), convergence)) return;
+                            pr(IPVZ,p), convergence)) {
+          if (pr(IPM,p) == 0.0) {
+            Kokkos::abort("Massless sink failed convergence in AccreteMass.");
+          }
+          return;
+        }
 
         // Step (a): integrate conserved vars over the 27 cells (pre-reset), and
         // Step (b): compute the 26 shell reset values into scratch from pre-reset u0.
@@ -438,6 +443,9 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         // read identical scratch values and take the same branch.
         Real reset_mass = 0.0;
         for (int c = 0; c < 27; ++c) reset_mass += scr(0,c);
+        if (pr(IPM,p) == 0.0 && !((s1[0]-reset_mass)*dV > 0.0)) {
+          Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
+        }
         if (reject_negative && reset_mass > s1[0]) return;
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
           for (int v=0; v<4; ++v) {
