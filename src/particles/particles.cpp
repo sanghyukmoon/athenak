@@ -48,37 +48,18 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   // orbit/gravity tests with inert or no gas leave it off so the kernel never runs
   accretion = pin->GetOrAddBoolean("particles","accretion",false);
   // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
-  creation = pin->GetOrAddBoolean("particles","creation",false);
+  creation = pin->GetOrAddBoolean("particles","creation",true);
   creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", false);
-  // sink-sink merging on overlapping control volumes (see particles_merger.cpp)
-  const std::string setup = pin->GetOrAddString("particles", "sink_setup", "tigris");
-  if (setup != "tigris" && setup != "legacy") {
-    std::cerr << "Unknown particles/sink_setup: " << setup << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  const bool reference = (setup == "tigris");
-  merging = pin->GetOrAddBoolean("particles", "merging", reference && creation);
-  merge_face_contact = pin->GetOrAddBoolean("particles", "merge_face_contact", false);
-  creation_exclusion = pin->GetOrAddBoolean("particles", "creation_exclusion",
-                                            !reference);
-  creation_zero_velocity = pin->GetOrAddBoolean("particles", "creation_zero_velocity",
-                                                reference);
-  reject_negative_accretion = pin->GetOrAddBoolean(
-      "particles", "reject_negative_accretion", reference);
   sanity_vmax = pin->GetOrAddReal("particles", "sanity_vmax", 0.0);
   sanity_flag_ = DvceArray1D<int>("sanity_flag", 1);
   sanity_rec_ = DvceArray1D<Real>("sanity_rec", kSanityRec);
   const std::string convergence = pin->GetOrAddString(
-      "particles", "sink_convergence", reference ? "mass_flux" : "off");
+      "particles", "sink_convergence", "mass_flux");
   if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {
     std::cerr << "Unknown particles/sink_convergence: " << convergence << std::endl;
     std::exit(EXIT_FAILURE);
   }
   sink_convergence = convergence == "off" ? 0 : (convergence == "mass_flux" ? 1 : 2);
-  if (creation && !creation_exclusion && !merging) {
-    std::cerr << "Creation without exclusion requires merging." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
 
   // particle CFL number (see particles.hpp); 0.5 guarantees <= 1 cell crossed per step
   cfl_par = pin->GetOrAddReal("particles","cfl_par",0.5);

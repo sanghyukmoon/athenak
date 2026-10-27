@@ -26,7 +26,7 @@ template<class T> T SinkMinimumImage(T d, T length, bool periodic) {
 }
 template<class T> bool SinkContact(const SinkMergeRecord<T> &a,
     const SinkMergeRecord<T> &b, const std::array<T,3> &origin,
-    const std::array<T,3> &length, bool periodic, bool faces) {
+    const std::array<T,3> &length, bool periodic) {
   int touches=0;
   for (int c=0; c<3; ++c) {
     T x=a.x[c], y=b.x[c];
@@ -36,14 +36,14 @@ template<class T> bool SinkContact(const SinkMergeRecord<T> &a,
     const T width=T(1.5)*(a.dx[c]+b.dx[c]);
     if (distance > width) return false;
     if (distance == width) {
-      if (!faces || ++touches > 1) return false;
+      if (++touches > 1) return false;
     }
   }
   return true;
 }
 template<class T, class Locate> void ResolveSinkMergers(
     std::vector<SinkMergeRecord<T>> &s, const std::array<T,3> &origin,
-    const std::array<T,3> &length, bool periodic, bool faces, Locate locate) {
+    const std::array<T,3> &length, bool periodic, Locate locate) {
   std::sort(s.begin(),s.end(),[](const auto &a,const auto &b){return a.tag<b.tag;});
   for (;;) {
     bool merged=false;
@@ -51,7 +51,7 @@ template<class T, class Locate> void ResolveSinkMergers(
       if (!s[i].alive) continue;
       for (size_t j=i+1; j<s.size(); ++j) {
         if (!s[j].alive ||
-            !SinkContact(s[i],s[j],origin,length,periodic,faces)) continue;
+            !SinkContact(s[i],s[j],origin,length,periodic)) continue;
         auto &a=s[i]; auto &b=s[j];
         const bool anew=a.mass==T(0), bnew=b.mass==T(0);
         if (anew != bnew) {

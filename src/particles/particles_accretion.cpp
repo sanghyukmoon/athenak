@@ -159,7 +159,6 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const int ncells3 = indcs.nx3 + 2*indcs.ng;
   const int gids = pmy_pack->gids;
   const int npart = nprtcl_thispack;
-  const bool reject_negative = reject_negative_accretion;
   const int convergence = sink_convergence;
   const int rctrl = 1;      // control volume = (2*rctrl+1)^3 = 27 cells (paper standard)
   const int nmb_ = pmy_pack->nmb_thispack;
@@ -446,7 +445,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         if (pr(IPM,p) == 0.0 && !((s1[0]-reset_mass)*dV > 0.0)) {
           Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
         }
-        if (reject_negative && reset_mass > s1[0]) return;
+        if (reset_mass > s1[0]) return;
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
           for (int v=0; v<4; ++v) {
             Real s2=0.0;

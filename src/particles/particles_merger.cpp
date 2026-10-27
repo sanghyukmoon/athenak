@@ -10,7 +10,7 @@
 //! New candidates carry zero physical mass and separate temporary merger weights.
 //! Every rank resolves the same tag-sorted global list, then updates its local arrays.
 //! The task chain migrates moved survivors before accretion.
-//! Optional merge_face_contact includes face adjacency but excludes edge/corner contact.
+//! Shared-face contact merges; edge/corner-only contact does not.
 
 #include <algorithm>
 #include <cmath>
@@ -46,7 +46,7 @@ constexpr int REC = 11;   // per-sink record: x,y,z,vx,vy,vz,m,dx1,dx2,dx3,tag
 
 TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;
-  if (particle_type != ParticleType::sink || !merging) return TaskStatus::complete;
+  if (particle_type != ParticleType::sink) return TaskStatus::complete;
   SinkTimerScope _st(this, ST_MERGE);
 
   const int nranks = global_variable::nranks;
@@ -169,8 +169,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     std::exit(EXIT_FAILURE);
   };
   ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
-                    std::array<Real,3>{L[0],L[1],L[2]}, per,
-                    merge_face_contact, locate);
+                    std::array<Real,3>{L[0],L[1],L[2]}, per, locate);
   for (const auto &s : sinks) {
     if (!s.alive) {
       absorbed.insert(s.tag);
