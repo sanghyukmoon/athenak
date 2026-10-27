@@ -144,7 +144,6 @@ class Particles {
   bool merge_face_contact = false;
   bool creation_exclusion = false;
   bool creation_zero_velocity = true;
-  bool accrete_old_position = false;
   bool reject_negative_accretion = true;
   int sink_convergence = 1;  // 0: off; 1: directional mass flux; 2: velocity gradient
 

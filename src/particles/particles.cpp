@@ -66,8 +66,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
                                             !reference);
   creation_zero_velocity = pin->GetOrAddBoolean("particles", "creation_zero_velocity",
                                                 reference);
-  accrete_old_position = pin->GetOrAddBoolean("particles", "accrete_old_position",
-                                              !reference);
   reject_negative_accretion = pin->GetOrAddBoolean(
       "particles", "reject_negative_accretion", reference);
   sanity_vmax = pin->GetOrAddReal("particles", "sanity_vmax", 0.0);
@@ -189,9 +187,8 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     pbval_phi->InitializeBuffers(1);
   }
 
-  // staging buffer + communicator for the cross-rank control-volume reset (MPI). Sized
-  // to hold every reset cell of every sink twice over (new + old CV = 54 cells), which
-  // bounds the off-rank-destined subset; overflow is guarded + warned in the kernel.
+  // Staging buffer + communicator for the cross-rank control-volume reset (MPI).
+  // Capacity covers each sink's 27 reset cells; overflow is guarded + warned in the kernel.
   if (particle_type == ParticleType::sink && accretion) {
     cvemit_max_ = std::max(1, nprtcl_thispack)*64;
     Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
