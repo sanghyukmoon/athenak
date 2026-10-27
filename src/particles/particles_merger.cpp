@@ -6,11 +6,10 @@
 //! \file particles_merger.cpp
 //! \brief sink-particle merging on overlapping control volumes.
 //!
-//! Default: cell-centred CV overlap and iterative pair reduction.
+//! Cell-centred CV overlap and iterative pair reduction.
 //! New candidates carry zero physical mass and separate temporary merger weights.
 //! Every rank resolves the same tag-sorted global list, then updates its local arrays.
-//! The task chain migrates moved survivors before accretion. Legacy physical-position
-//! overlap and one-shot union-find remain available via sink_setup=legacy.
+//! The task chain migrates moved survivors before accretion.
 //! Optional merge_face_contact includes face adjacency but excludes edge/corner contact.
 
 #include <algorithm>
@@ -38,19 +37,6 @@
 namespace particles {
 
 namespace {
-// Union-find with path halving (host, tiny N).
-int uf_find(std::vector<int> &parent, int x) {
-  while (parent[x] != x) {
-    parent[x] = parent[parent[x]];
-    x = parent[x];
-  }
-  return x;
-}
-void uf_union(std::vector<int> &parent, int a, int b) {
-  a = uf_find(parent, a);
-  b = uf_find(parent, b);
-  if (a != b) parent[b] = a;
-}
 constexpr int REC = 11;   // per-sink record: x,y,z,vx,vy,vz,m,dx1,dx2,dx3,tag
 }  // namespace
 
@@ -70,8 +56,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   auto msz_h = mbsize.h_view;
   const int gids = pmy_pack->gids;
   const int nmb = pmy_pack->nmb_thispack;
-  const int rctrl = 1;
-  const Real hfac = static_cast<Real>(rctrl) + 0.5;   // control-volume half-width in dx
   const bool per = pmy_pack->pmesh->strictly_periodic;
   auto &msz = pmy_pack->pmesh->mesh_size;
   const Real L[3] = {msz.x1max-msz.x1min, msz.x2max-msz.x2min, msz.x3max-msz.x3min};
@@ -155,112 +139,48 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   struct Surv { Real x, y, z, vx, vy, vz, M; };
   std::map<int, Surv> survmap;
   std::set<int> absorbed;
-  if (merge_iterative) {
-    std::vector<SinkMergeRecord<Real>> sinks;
-    for (int i=0; i<Ntot; ++i) {
-      const Real *r=&G[static_cast<size_t>(i)*REC];
-      sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]}, {r[7],r[8],r[9]},
-                       r[6], 1.0, static_cast<int>(r[10])});
-    }
-    auto locate = [&](SinkMergeRecord<Real> &s) {
-      auto *pm=pmy_pack->pmesh;
-      for (int g=0; g<pm->nmb_total; ++g) {
-        const auto &ll=pm->lloc_eachmb[g];
-        const int shift=ll.level-pm->root_level;
-        const int nb[3]={pm->nmb_rootx1<<shift,pm->nmb_rootx2<<shift,
-                         pm->nmb_rootx3<<shift};
-        const auto ix=std::array<std::int64_t,3>{ll.lx1,ll.lx2,ll.lx3};
-        bool inside=true;
-        for (int c=0; c<3; ++c) {
-          const Real lo=LeftEdgeX(ix[c],nb[c],dlo[c],dlo[c]+L[c]);
-          const Real hi=LeftEdgeX(ix[c]+1,nb[c],dlo[c],dlo[c]+L[c]);
-          inside=inside && s.x[c]>=lo && s.x[c]<hi;
-        }
-        if (inside) {
-          s.dx={L[0]/(nb[0]*pm->mb_indcs.nx1), L[1]/(nb[1]*pm->mb_indcs.nx2),
-                L[2]/(nb[2]*pm->mb_indcs.nx3)};
-          return;
-        }
+  std::vector<SinkMergeRecord<Real>> sinks;
+  for (int i=0; i<Ntot; ++i) {
+    const Real *r=&G[static_cast<size_t>(i)*REC];
+    sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]}, {r[7],r[8],r[9]},
+                     r[6], 1.0, static_cast<int>(r[10])});
+  }
+  auto locate = [&](SinkMergeRecord<Real> &s) {
+    auto *pm=pmy_pack->pmesh;
+    for (int g=0; g<pm->nmb_total; ++g) {
+      const auto &ll=pm->lloc_eachmb[g];
+      const int shift=ll.level-pm->root_level;
+      const int nb[3]={pm->nmb_rootx1<<shift,pm->nmb_rootx2<<shift,
+                       pm->nmb_rootx3<<shift};
+      const auto ix=std::array<std::int64_t,3>{ll.lx1,ll.lx2,ll.lx3};
+      bool inside=true;
+      for (int c=0; c<3; ++c) {
+        const Real lo=LeftEdgeX(ix[c],nb[c],dlo[c],dlo[c]+L[c]);
+        const Real hi=LeftEdgeX(ix[c]+1,nb[c],dlo[c],dlo[c]+L[c]);
+        inside=inside && s.x[c]>=lo && s.x[c]<hi;
       }
-      std::cerr << "Merged sink has no owning MeshBlock" << std::endl;
-      std::exit(EXIT_FAILURE);
-    };
-    ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
-                      std::array<Real,3>{L[0],L[1],L[2]}, per,
-                      merge_cell_centers, merge_face_contact, locate);
-    for (const auto &s : sinks) {
-      if (!s.alive) {
-        absorbed.insert(s.tag);
-      } else if (s.changed) {
-        survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
+      if (inside) {
+        s.dx={L[0]/(nb[0]*pm->mb_indcs.nx1), L[1]/(nb[1]*pm->mb_indcs.nx2),
+              L[2]/(nb[2]*pm->mb_indcs.nx3)};
+        return;
       }
     }
-    if (absorbed.empty()) return refresh_return();
-    if (my_rank==0) std::printf("MergeSinks: iterative removed %zu sinks cycle=%d\n",
-                                absorbed.size(),pmy_pack->pmesh->ncycle);
-  } else {
-  // ---- global union-find over all sinks (identical on every rank) ----
-  auto GX = [&](int i, int c) -> Real { return G[static_cast<size_t>(i)*REC + c]; };
-  auto mimg = [&](Real d, int c) { return per ? d - L[c]*std::floor(d/L[c] + 0.5) : d; };
-  std::vector<int> parent(Ntot);
-  for (int i = 0; i < Ntot; ++i) parent[i] = i;
-  for (int a = 0; a < Ntot; ++a) {
-    for (int b = a+1; b < Ntot; ++b) {
-      Real sx = mimg(GX(a,0)-GX(b,0), 0), sy = mimg(GX(a,1)-GX(b,1), 1),
-           sz = mimg(GX(a,2)-GX(b,2), 2);
-      Real tx = hfac*(GX(a,7)+GX(b,7)), ty = hfac*(GX(a,8)+GX(b,8)),
-           tz = hfac*(GX(a,9)+GX(b,9));
-      if (std::fabs(sx) >= tx || std::fabs(sy) >= ty || std::fabs(sz) >= tz) continue;
-      uf_union(parent, a, b);
+    std::cerr << "Merged sink has no owning MeshBlock" << std::endl;
+    std::exit(EXIT_FAILURE);
+  };
+  ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
+                    std::array<Real,3>{L[0],L[1],L[2]}, per,
+                    merge_face_contact, locate);
+  for (const auto &s : sinks) {
+    if (!s.alive) {
+      absorbed.insert(s.tag);
+    } else if (s.changed) {
+      survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
     }
   }
-  std::vector<std::vector<int>> groups(Ntot);
-  for (int i = 0; i < Ntot; ++i) groups[uf_find(parent, i)].push_back(i);
-  bool any = false;
-  for (int r = 0; r < Ntot && !any; ++r) any = (groups[r].size() > 1);
-  if (!any) return refresh_return();
-
-  // ---- reduce merged groups: survivor tag + conserved (M, COM, v) ----
-
-
-
-  for (int root = 0; root < Ntot; ++root) {
-    auto &mem = groups[root];
-    if (mem.size() < 2) continue;
-    std::sort(mem.begin(), mem.end(), [&](int a, int b){ return GX(a,10) < GX(b,10); });
-    const int ref = mem[0];
-    const Real xr = GX(ref,0), yr = GX(ref,1), zr = GX(ref,2);
-    Real M=0, sx=0, sy=0, sz=0, svx=0, svy=0, svz=0, mmax=-1.0;
-    int survtag = static_cast<int>(GX(ref,10));
-    for (int i : mem) {
-      const Real m = GX(i,6);
-      const Real ox = mimg(GX(i,0)-xr,0);
-      const Real oy = mimg(GX(i,1)-yr,1);
-      const Real oz = mimg(GX(i,2)-zr,2);
-      M += m; sx += m*ox; sy += m*oy; sz += m*oz;
-      svx += m*GX(i,3); svy += m*GX(i,4); svz += m*GX(i,5);
-      if (m > mmax) { mmax = m; survtag = static_cast<int>(GX(i,10)); }
-    }
-    if (!(M > 0.0)) continue;
-    Real xc = xr + sx/M, yc = yr + sy/M, zc = zr + sz/M;
-    if (per) {
-      xc -= L[0]*std::floor((xc-dlo[0])/L[0]);
-      yc -= L[1]*std::floor((yc-dlo[1])/L[1]);
-      zc -= L[2]*std::floor((zc-dlo[2])/L[2]);
-    }
-    survmap[survtag] = {xc, yc, zc, svx/M, svy/M, svz/M, M};
-    for (int i : mem) {
-      const int tg = static_cast<int>(GX(i,10));
-      if (tg != survtag) absorbed.insert(tg);
-    }
-    if (my_rank == 0) {
-      std::printf("MergeSinks: %d sinks -> tag %d (M=%.6e) at (%.5f, %.5f, %.5f) "
-                  "cycle=%d\n",
-                  static_cast<int>(mem.size()), survtag, M, xc, yc, zc,
-                  pmy_pack->pmesh->ncycle);
-    }
-  }
-  }
+  if (absorbed.empty()) return refresh_return();
+  if (my_rank==0) std::printf("MergeSinks: iterative removed %zu sinks cycle=%d\n",
+                              absorbed.size(),pmy_pack->pmesh->ncycle);
 
   // ---- pre-merge totals, measured from the ACTUAL particle arrays ----------------
   // NOT from the gathered list G. Summing G before and after the group reduction only

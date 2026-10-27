@@ -58,8 +58,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   }
   const bool reference = (setup == "tigris");
   merging = pin->GetOrAddBoolean("particles", "merging", reference && creation);
-  merge_iterative = pin->GetOrAddBoolean("particles", "merge_iterative", reference);
-  merge_cell_centers = pin->GetOrAddBoolean("particles", "merge_cell_centers", reference);
   merge_face_contact = pin->GetOrAddBoolean("particles", "merge_face_contact", false);
   creation_exclusion = pin->GetOrAddBoolean("particles", "creation_exclusion",
                                             !reference);
@@ -77,12 +75,8 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     std::exit(EXIT_FAILURE);
   }
   sink_convergence = convergence == "off" ? 0 : (convergence == "mass_flux" ? 1 : 2);
-  if (!merge_iterative && (merge_cell_centers || merge_face_contact)) {
-    std::cerr << "Cell/face merger geometry requires merge_iterative=true." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  if (creation && !creation_exclusion && (!merging || !merge_iterative)) {
-    std::cerr << "Creation without exclusion requires iterative merging." << std::endl;
+  if (creation && !creation_exclusion && !merging) {
+    std::cerr << "Creation without exclusion requires merging." << std::endl;
     std::exit(EXIT_FAILURE);
   }
 

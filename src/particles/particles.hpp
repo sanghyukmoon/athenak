@@ -132,10 +132,9 @@ class Particles {
   // control volumes that AccreteMass cannot otherwise handle, so it is ordered
   // create -> merge -> accrete. See particles_merger.cpp.
   bool merging = false;
-  // Reference defaults; sink_setup=legacy restores the previous defaults.
-  bool merge_iterative = true;
-  bool merge_cell_centers = true;
+  // Include control volumes that touch across a face, but not at an edge or corner.
   bool merge_face_contact = false;
+  // Reference defaults; sink_setup=legacy restores the previous defaults.
   bool creation_exclusion = false;
   bool creation_zero_velocity = true;
   bool reject_negative_accretion = true;
