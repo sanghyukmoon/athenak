@@ -132,12 +132,6 @@ class Particles {
   // control volumes that AccreteMass cannot otherwise handle, so it is ordered
   // create -> merge -> accrete. See particles_merger.cpp.
   bool merging = false;
-  // Require the overlapping pair to be gravitationally bound before merging
-  // (<particles>/merge_bound, default false): 0.5*mu*|dv|^2 - G*m_a*m_b/r < 0. Rejects
-  // unbound fly-bys that momentarily pass within the halo. Set false to merge on halo
-  // overlap alone. Needs the gravity module; falls back to overlap-only (one-time
-  // warning) if <gravity> is absent.
-  bool merge_bound = false;
   // Reference defaults; sink_setup=legacy restores the previous defaults.
   bool merge_iterative = true;
   bool merge_cell_centers = true;

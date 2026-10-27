@@ -6,11 +6,11 @@
 //! \file particles_merger.cpp
 //! \brief sink-particle merging on overlapping control volumes.
 //!
-//! Default: cell-centred CV overlap, iterative pair reduction, no binding gate.
+//! Default: cell-centred CV overlap and iterative pair reduction.
 //! New candidates carry zero physical mass and separate temporary merger weights.
 //! Every rank resolves the same tag-sorted global list, then updates its local arrays.
 //! The task chain migrates moved survivors before accretion. Legacy physical-position
-//! overlap, binding gate and one-shot union-find remain available via sink_setup=legacy.
+//! overlap and one-shot union-find remain available via sink_setup=legacy.
 //! Optional merge_face_contact includes face adjacency but excludes edge/corner contact.
 
 #include <algorithm>
@@ -27,7 +27,6 @@
 #include "globals.hpp"
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
-#include "gravity/gravity.hpp"
 #include "particles.hpp"
 #include "sink_merge.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -66,24 +65,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 
   const int nranks = global_variable::nranks;
   const int my_rank = global_variable::my_rank;
-
-  // boundedness constant G = four_pi_G/(4 pi); fall back to overlap-only (one-time
-  // warning) if merge_bound is requested without a gravity module.
-  bool do_bound = merge_bound;
-  Real Ggrav = 0.0;
-  if (do_bound) {
-    if (pmy_pack->pgrav != nullptr) {
-      Ggrav = pmy_pack->pgrav->four_pi_G/(4.0*M_PI);
-    } else {
-      static bool warned = false;
-      if (!warned && my_rank == 0) {
-        std::cout << "### WARNING in Particles::MergeSinks: merge_bound=true but no "
-                  << "<gravity> module; merging on halo overlap alone." << std::endl;
-        warned = true;
-      }
-      do_bound = false;
-    }
-  }
 
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto msz_h = mbsize.h_view;
@@ -206,7 +187,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     };
     ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
                       std::array<Real,3>{L[0],L[1],L[2]}, per,
-                      merge_cell_centers, merge_face_contact, do_bound, Ggrav, locate);
+                      merge_cell_centers, merge_face_contact, locate);
     for (const auto &s : sinks) {
       if (!s.alive) {
         absorbed.insert(s.tag);
@@ -230,11 +211,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
       Real tx = hfac*(GX(a,7)+GX(b,7)), ty = hfac*(GX(a,8)+GX(b,8)),
            tz = hfac*(GX(a,9)+GX(b,9));
       if (std::fabs(sx) >= tx || std::fabs(sy) >= ty || std::fabs(sz) >= tz) continue;
-      if (do_bound) {
-        Real dvx=GX(a,3)-GX(b,3), dvy=GX(a,4)-GX(b,4), dvz=GX(a,5)-GX(b,5);
-        Real r = std::sqrt(sx*sx+sy*sy+sz*sz), M = GX(a,6)+GX(b,6);
-        if (!(0.5*(dvx*dvx+dvy*dvy+dvz*dvz)*r < Ggrav*M)) continue;
-      }
       uf_union(parent, a, b);
     }
   }

@@ -58,7 +58,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   }
   const bool reference = (setup == "tigris");
   merging = pin->GetOrAddBoolean("particles", "merging", reference && creation);
-  merge_bound = pin->GetOrAddBoolean("particles", "merge_bound", !reference);
   merge_iterative = pin->GetOrAddBoolean("particles", "merge_iterative", reference);
   merge_cell_centers = pin->GetOrAddBoolean("particles", "merge_cell_centers", reference);
   merge_face_contact = pin->GetOrAddBoolean("particles", "merge_face_contact", false);

@@ -45,8 +45,7 @@ template<class T> bool SinkContact(const SinkMergeRecord<T> &a,
 }
 template<class T, class Locate> void ResolveSinkMergers(
     std::vector<SinkMergeRecord<T>> &s, const std::array<T,3> &origin,
-    const std::array<T,3> &length, bool periodic, bool cells, bool faces,
-    bool bound, T grav, Locate locate) {
+    const std::array<T,3> &length, bool periodic, bool cells, bool faces, Locate locate) {
   std::sort(s.begin(),s.end(),[](const auto &a,const auto &b){return a.tag<b.tag;});
   for (;;) {
     bool merged=false;
@@ -57,16 +56,6 @@ template<class T, class Locate> void ResolveSinkMergers(
             !SinkContact(s[i],s[j],origin,length,periodic,cells,faces)) continue;
         auto &a=s[i]; auto &b=s[j];
         const bool anew=a.mass==T(0), bnew=b.mass==T(0);
-        // A new candidate is not a physical body: geometric rejection must not
-        // depend on a binding energy involving its zero mass.
-        if (bound && !anew && !bnew) {
-          T r2=0, v2=0;
-          for (int c=0; c<3; ++c) {
-            T d=SinkMinimumImage(a.x[c]-b.x[c],length[c],periodic);
-            r2+=d*d; v2+=(a.v[c]-b.v[c])*(a.v[c]-b.v[c]);
-          }
-          if (!(T(0.5)*v2*std::sqrt(r2)<grav*(a.mass+b.mass))) continue;
-        }
         if (anew != bnew) {
           (anew ? a : b).alive=false;
           (anew ? b : a).changed=true;
