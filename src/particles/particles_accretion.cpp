@@ -154,6 +154,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const int is = indcs.is, ie = indcs.ie;
   const int js = indcs.js, je = indcs.je;
   const int ks = indcs.ks, ke = indcs.ke;
+  const int ng = indcs.ng;
   const int ncells1 = indcs.nx1 + 2*indcs.ng;
   const int ncells2 = indcs.nx2 + 2*indcs.ng;
   const int ncells3 = indcs.nx3 + 2*indcs.ng;
@@ -333,25 +334,11 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       const int kp  = static_cast<int>(Kokkos::floor(xi3)) - off3 + ks;
 
       // ---- eligibility gate --------------------------------------------------------
-      // Use a conservative reach of rctrl+2.5 cells for the control volume and its
-      // extrapolation reads. Level jumps in that region are HANDLED (see the level rule
-      // in the file comment), so the only
-      // reasons to bail out are defensive: a level jump of more than one, which proper
-      // nesting forbids and whose scatter factors are not derived here. Off-rank
-      // neighbours within reach set touches_offrank, which stages this sink's reset cells
-      // for ExchangeCVReset. (Computed redundantly by every team thread; all take
-      // identical branches.)
+      // Level jumps of more than one violate proper nesting and are not handled.
+      // Stage resets when they can reach an off-rank neighbour's interior or ghosts.
+      // (Computed redundantly by every team thread; all take identical branches.)
       const int mylev = mblev.d_view(m);
       const Real xs = pr(IPX, p), ys = pr(IPY, p), zs = pr(IPZ, p);
-      const Real h1 = (rctrl + 2.5)*dx1, h2 = (rctrl + 2.5)*dx2, h3 = (rctrl + 2.5)*dx3;
-      // proximity of the sink to any owner face, i.e. "the reach leaves this block".
-      // Used for off-rank neighbours, whose boxes are not addressable on the device.
-      const bool near_face = (xs - mbsize.d_view(m).x1min < h1) ||
-                             (mbsize.d_view(m).x1max - xs < h1) ||
-                             (ys - mbsize.d_view(m).x2min < h2) ||
-                             (mbsize.d_view(m).x2max - ys < h2) ||
-                             (zs - mbsize.d_view(m).x3min < h3) ||
-                             (mbsize.d_view(m).x3max - zs < h3);
       bool eligible = true;
       for (int n = 0; n < nnghbr; ++n) {
         if (nghbr.d_view(m,n).gid < 0) continue;
@@ -359,7 +346,17 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         if (dlev > 1 || dlev < -1) {   // proper nesting violated: refuse to guess
           eligible = false; break;
         }
-        if (nghbr.d_view(m,n).rank != my_rank && near_face) touches_offrank = true;
+        if (nghbr.d_view(m,n).rank != my_rank) {
+          // Coarse ghosts are twice as wide; owner spacing also bounds finer ghosts.
+          const int reach = rctrl + ng*(dlev < 0 ? 2 : 1);
+          const Real h1 = reach*dx1, h2 = reach*dx2, h3 = reach*dx3;
+          if ((xs - mbsize.d_view(m).x1min <= h1) ||
+              (mbsize.d_view(m).x1max - xs <= h1) ||
+              (ys - mbsize.d_view(m).x2min <= h2) ||
+              (mbsize.d_view(m).x2max - ys <= h2) ||
+              (zs - mbsize.d_view(m).x3min <= h3) ||
+              (mbsize.d_view(m).x3max - zs <= h3)) touches_offrank = true;
+        }
       }
       if (!eligible) {
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
