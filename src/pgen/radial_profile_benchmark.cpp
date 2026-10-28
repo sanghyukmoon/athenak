@@ -1,28 +1,19 @@
 // Static/dynamic radial-profile performance benchmark with synthetic centers.
-#include <sched.h>
-#include <unistd.h>
-
 #include <algorithm>
-#include <cmath>
 #include <cstdlib>
-#include <fstream>
-#include <iomanip>
+#include <cstdint>
 #include <iostream>
 #include <random>
-#include <string>
-#include <type_traits>
 #include <vector>
 
 #include "athena.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "mesh/mesh.hpp"
-#include "eos/eos.hpp"
 #include "globals.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 #include "utils/radial_profile.hpp"
-#include "bvals/bvals.hpp"
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
 #endif
@@ -74,17 +65,8 @@ DvceArray1D<RadialProfileCenter> DomainCenter(Mesh *pm, int num_centers) {
 }
 
 void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
-  const int num_centers = pin->GetOrAddInteger("problem", "num_centers", 100);
-  const int num_repeats = pin->GetOrAddInteger("problem", "num_repeats", 100);
-  if (num_repeats <= 0) {
-    std::cerr << "### FATAL ERROR in radial_profile_benchmark: "
-              << "problem/num_repeats must be positive, got " << num_repeats
-              << std::endl;
-    #if MPI_PARALLEL_ENABLED
-    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    #endif
-    std::exit(EXIT_FAILURE);
-  }
+  const int num_centers = pin->GetInteger("problem", "num_centers");
+  const int num_repeats = pin->GetInteger("problem", "num_repeats");
   Real rmax = pin->GetReal("problem", "rmax");
   int nbins_subcell_corrected = pin->GetInteger("problem", "nbins_subcell_corrected");
   int nsub = pin->GetInteger("problem", "nsub");
@@ -92,13 +74,9 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   RadialProfile radial_profile(pm, rmax, nbins_subcell_corrected, nsub);
   const auto centers = DomainCenter(pm, num_centers);
 
-  // Warm up outside timing and obtain the actual radial-bin count from the result.
+  // Warm up outside timing
   radial_profile.measure_time = false;
-  int num_radial_bins;
-  {
-    const auto profiles = radial_profile.Compute(centers);
-    num_radial_bins = profiles.extent(2);
-  }
+  radial_profile.Compute(centers);
   Kokkos::fence();
 
   // Time whole calls, including allocation, MPI, flux, and result destruction.
@@ -106,27 +84,28 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
   #if MPI_PARALLEL_ENABLED
   MPI_Barrier(MPI_COMM_WORLD);
   #endif
-  Kokkos::Timer clock;
+  Kokkos::Timer run_time;
   for (int repeat = 0; repeat < num_repeats; ++repeat) {
     radial_profile.Compute(centers);
   }
   Kokkos::fence();
-  const double elapsed = clock.seconds();
-  double max_elapsed = elapsed;
+  float exe_time_thisrank = run_time.seconds();
+  float exe_time = exe_time_thisrank;
   #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE,
-                MPI_MAX, MPI_COMM_WORLD);
+  MPI_Allreduce(&exe_time_thisrank, &exe_time, 1, MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);
   #endif
-  const auto &indcs = pm->mesh_indcs;
-  const std::uint64_t num_cells = static_cast<std::uint64_t>(indcs.nx1) *
-                                  indcs.nx2 * indcs.nx3;
-  const double seconds_per_batch = max_elapsed/num_repeats;
-  const double seconds_per_center = seconds_per_batch/num_centers;
-  const double batches_per_second = 1.0/seconds_per_batch;
-  const double cell_center_pairs_per_second =
-      static_cast<double>(num_cells)*num_centers/seconds_per_batch;
 
-  // One separate, instrumented batch; its phase fences do not affect primary timing.
+  int nmb = pm->nmb_total;
+  std::uint64_t zonecycles = num_repeats * nmb * static_cast<uint64_t>(pm->NumberOfMeshBlockCells());
+  float zcps = static_cast<float>(zonecycles) / exe_time;
+
+  if (global_variable::my_rank == 0) {
+    std::cout << "RadialProfile performance for " << num_centers << " centers..." << std::endl;
+    std::cout << "cpu time used  = " << exe_time << std::endl;
+    std::cout << "equivalent zone-cycles/cpu_second = " << zcps << std::endl;
+  }
+
+  // Phase-separated diagnostics
   #if MPI_PARALLEL_ENABLED
   MPI_Barrier(MPI_COMM_WORLD);
   #endif
@@ -138,55 +117,22 @@ void BenchmarkRadialProfile(ParameterInput *pin, Mesh *pm) {
     "allocation", "accumulation", "shell_reduction", "normalization",
     "magnetic_flux", "total"
   };
-  const double phase_seconds[] = {
+  const double exe_time_by_phase_local[] = {
     t.allocation, t.accumulation, t.reduction, t.normalization, t.flux, t.total
   };
-  double phase_sums[6], phase_maxima[6];
+  double exe_time_by_phase[6];
   #if MPI_PARALLEL_ENABLED
-  MPI_Reduce(phase_seconds, phase_sums, 6, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-  MPI_Reduce(phase_seconds, phase_maxima, 6, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(exe_time_by_phase_local, exe_time_by_phase, 6, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
   #else
-  std::copy(phase_seconds, phase_seconds + 6, phase_sums);
-  std::copy(phase_seconds, phase_seconds + 6, phase_maxima);
+  std::copy(exe_time_by_phase_local, exe_time_by_phase_local + 6, exe_time_by_phase);
   #endif
 
   if (global_variable::my_rank == 0) {
-    const auto previous_precision = std::cout.precision(12);
-    const auto &mb_indcs = pm->mb_indcs;
-    std::cout << "RadialProfile performance... " << std::endl;
-    std::cout << "rprof.global_nx1 = " << indcs.nx1 << std::endl;
-    std::cout << "rprof.global_nx2 = " << indcs.nx2 << std::endl;
-    std::cout << "rprof.global_nx3 = " << indcs.nx3 << std::endl;
-    std::cout << "rprof.meshblock_nx1 = " << mb_indcs.nx1 << std::endl;
-    std::cout << "rprof.meshblock_nx2 = " << mb_indcs.nx2 << std::endl;
-    std::cout << "rprof.meshblock_nx3 = " << mb_indcs.nx3 << std::endl;
-    std::cout << "rprof.global_active_cells = " << num_cells << std::endl;
-    std::cout << "rprof.mpi_ranks = " << global_variable::nranks << std::endl;
-    std::cout << "rprof.num_centers = " << num_centers << std::endl;
-    std::cout << "rprof.num_repeats = " << num_repeats << std::endl;
-    std::cout << "rprof.rmax = " << rmax << std::endl;
-    std::cout << "rprof.num_radial_bins = " << num_radial_bins << std::endl;
-    std::cout << "rprof.nbins_subcell_corrected = " << nbins_subcell_corrected
-              << std::endl;
-    std::cout << "rprof.nsub = " << nsub << std::endl;
-    std::cout << "rprof.elapsed_seconds = " << max_elapsed << std::endl;
-    std::cout << "rprof.seconds_per_batch = " << seconds_per_batch << std::endl;
-    std::cout << "rprof.seconds_per_center = " << seconds_per_center << std::endl;
-    std::cout << "rprof.batches_per_second = " << batches_per_second << std::endl;
-    std::cout << "rprof.cell_center_pairs_per_second = "
-              << cell_center_pairs_per_second << std::endl;
-    std::cout << "Cell-center throughput measures nominal workload, not kernel "
-              << "operations or MHD zone-cycles." << std::endl;
-    std::cout << "Phase timings: one separately instrumented batch, rank means "
-              << "and maxima in seconds. Independent phase maxima need not sum "
-              << "to maximum total time." << std::endl;
+    std::cout << "Rprof performance phase by phase" << std::endl;
     for (int phase = 0; phase < 6; ++phase) {
-      std::cout << "rprof.phase." << phase_names[phase] << ".mean_seconds = "
-                << phase_sums[phase]/global_variable::nranks << std::endl;
       std::cout << "rprof.phase." << phase_names[phase] << ".max_seconds = "
-                << phase_maxima[phase] << std::endl;
+                << exe_time_by_phase[phase] << std::endl;
     }
-    std::cout.precision(previous_precision);
   }
 }
 
