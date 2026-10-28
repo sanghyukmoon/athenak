@@ -482,6 +482,12 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     if (pz4c != nullptr) {
       (void) pmesh->pmb_pack->pz4c->NewTimeStep(this, nexp_stages);
     }
+    auto *ppart = pmesh->pmb_pack->ppart;
+    if (res_flag && ppart != nullptr && ppart->particle_type == ParticleType::sink &&
+        (ppart->pusher == ParticlesPusher::leapfrog ||
+         ppart->pusher == ParticlesPusher::rk3)) {
+      (void) ppart->NewTimeStep(this, nexp_stages);
+    }
 
     pmesh->NewTimeStep(tlim);
     RefreshSTSCycleState(pmesh);

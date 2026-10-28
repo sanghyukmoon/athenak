@@ -27,6 +27,7 @@
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "particles/particles.hpp"
 #include "pgen.hpp"
 
 
@@ -202,6 +203,88 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     }
 #endif
     std::memcpy(&(pturb->rstate), &(rng_data[0]), sizeof(RNG_State));
+  }
+
+  // Read sink particle state before the MeshBlock field records.
+  auto *ppart = pm->pmb_pack->ppart;
+  if (ppart != nullptr && ppart->particle_type == ParticleType::sink) {
+    int particle_header[5];
+    if (global_variable::my_rank == 0 || single_file_per_rank) {
+      if (resfile.Read_bytes(particle_header, sizeof(int), 5, single_file_per_rank) != 5) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Sink restart header is missing or truncated."
+                  << std::endl;
+#if MPI_PARALLEL_ENABLED
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+        std::exit(EXIT_FAILURE);
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    if (!single_file_per_rank) {
+      MPI_Bcast(particle_header, 5, MPI_INT, 0, MPI_COMM_WORLD);
+    }
+#endif
+    if (particle_header[0] != 1 || particle_header[1] < 0 ||
+        particle_header[2] != ppart->nrdata || particle_header[3] != ppart->nidata) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Sink restart format or property layout is incompatible; "
+                << "a checkpoint with native sink state is required." << std::endl;
+#if MPI_PARALLEL_ENABLED
+      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+      std::exit(EXIT_FAILURE);
+    }
+    const int npart = particle_header[1];
+    HostArray2D<Real> rdata("rst-part-real", ppart->nrdata, npart);
+    HostArray2D<int> idata("rst-part-int", ppart->nidata, npart);
+    if (global_variable::my_rank == 0 || single_file_per_rank) {
+      if (resfile.Read_Reals(rdata.data(), rdata.size(), single_file_per_rank)
+              != rdata.size() ||
+          resfile.Read_bytes(idata.data(), sizeof(int), idata.size(), single_file_per_rank)
+              != idata.size()) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Sink data size read from restart file is incorrect."
+                  << std::endl;
+#if MPI_PARALLEL_ENABLED
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+        std::exit(EXIT_FAILURE);
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    if (!single_file_per_rank) {
+      MPI_Bcast(rdata.data(), rdata.size(), MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+      MPI_Bcast(idata.data(), idata.size(), MPI_INT, 0, MPI_COMM_WORLD);
+    }
+#endif
+    int nlocal = 0;
+    for (int p=0; p<npart; ++p) {
+      const int gid = idata(PGID,p);
+      if (gid < 0 || gid >= pm->nmb_total) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Sink restart contains an invalid MeshBlock GID."
+                  << std::endl;
+#if MPI_PARALLEL_ENABLED
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+        std::exit(EXIT_FAILURE);
+      }
+      if (pm->rank_eachmb[gid] == global_variable::my_rank) ++nlocal;
+    }
+    ppart->ResizeParticles(nlocal);
+    auto local_rdata = Kokkos::create_mirror_view(ppart->prtcl_rdata);
+    auto local_idata = Kokkos::create_mirror_view(ppart->prtcl_idata);
+    int local = 0;
+    for (int p=0; p<npart; ++p) {
+      if (pm->rank_eachmb[idata(PGID,p)] != global_variable::my_rank) continue;
+      for (int n=0; n<ppart->nrdata; ++n) local_rdata(n,local) = rdata(n,p);
+      for (int n=0; n<ppart->nidata; ++n) local_idata(n,local) = idata(n,p);
+      ++local;
+    }
+    Kokkos::deep_copy(ppart->prtcl_rdata, local_rdata);
+    Kokkos::deep_copy(ppart->prtcl_idata, local_idata);
+    ppart->created_total_ = particle_header[4];
   }
 
   // root process reads size of CC and FC data arrays from restart file
