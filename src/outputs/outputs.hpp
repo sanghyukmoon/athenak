@@ -384,6 +384,11 @@ class RestartOutput : public BaseTypeOutput {
   void LoadOutputData(Mesh *pm) override;
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
   void WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final);
+
+ private:
+  HostArray2D<Real> outpart_rdata;
+  HostArray2D<int> outpart_idata;
+  int npout = 0;  // number of sinks in this restart file
 };
 
 // Forward declaration
