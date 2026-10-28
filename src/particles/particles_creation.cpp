@@ -224,7 +224,10 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   nprtcl_thispack = npart_new;
   if (phistory != nullptr) {
     Mesh *pm = pmy_pack->pmesh;
-    phistory->WriteParticles(pm, npart, nkeep, pm->time + pm->dt, pm->ncycle + 1);
+    // Note that, because sink creation uses the updated gas field, the consistent
+    // time is the "next" timestep; thus, we add dt to the current time in the
+    // history.
+    phistory->WriteParticles(pm, npart, nnew, pm->time + pm->dt, pm->ncycle + 1);
   }
   // creation changed the particle count, so refresh the Mesh's global bookkeeping
   // (nprtcl_total / nprtcl_eachrank) that the outputs read. Collective; every rank
