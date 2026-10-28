@@ -80,8 +80,7 @@ enum MetricIndex {I00=0, I01=1, I02=2, I03=3, I11=4, I12=5, I13=6, I22=7, I23=8,
 //                                 not communicated on MB migration)
 //   IPX0,IPY0,IPZ0             -- position at the start of the current step (saved in
 //                                 the stage-1 leapfrog push immediately before the
-//                                 drift); used by AccreteMass to detect sink-cell
-//                                 crossings (old control-volume correction)
+//                                 drift); also used as the RK3 position registers
 //   IPVX0,IPVY0,IPVZ0          -- start-of-step velocity registers, RK3 pusher only
 //   NRDATA_SINK -- total real columns for sink type (3D layout always; 2D
 //                  runs leave IPZ/IPVZ/IPGZ at zero)

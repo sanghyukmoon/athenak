@@ -48,46 +48,18 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   // orbit/gravity tests with inert or no gas leave it off so the kernel never runs
   accretion = pin->GetOrAddBoolean("particles","accretion",false);
   // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
-  creation = pin->GetOrAddBoolean("particles","creation",false);
+  creation = pin->GetOrAddBoolean("particles","creation",true);
   creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", false);
-  // sink-sink merging on overlapping control volumes (see particles_merger.cpp)
-  const std::string setup = pin->GetOrAddString("particles", "sink_setup", "tigris");
-  if (setup != "tigris" && setup != "legacy") {
-    std::cerr << "Unknown particles/sink_setup: " << setup << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  const bool reference = (setup == "tigris");
-  merging = pin->GetOrAddBoolean("particles", "merging", reference && creation);
-  merge_bound = pin->GetOrAddBoolean("particles", "merge_bound", !reference);
-  merge_iterative = pin->GetOrAddBoolean("particles", "merge_iterative", reference);
-  merge_cell_centers = pin->GetOrAddBoolean("particles", "merge_cell_centers", reference);
-  merge_face_contact = pin->GetOrAddBoolean("particles", "merge_face_contact", false);
-  creation_exclusion = pin->GetOrAddBoolean("particles", "creation_exclusion",
-                                            !reference);
-  creation_zero_velocity = pin->GetOrAddBoolean("particles", "creation_zero_velocity",
-                                                reference);
-  accrete_old_position = pin->GetOrAddBoolean("particles", "accrete_old_position",
-                                              !reference);
-  reject_negative_accretion = pin->GetOrAddBoolean(
-      "particles", "reject_negative_accretion", reference);
   sanity_vmax = pin->GetOrAddReal("particles", "sanity_vmax", 0.0);
   sanity_flag_ = DvceArray1D<int>("sanity_flag", 1);
   sanity_rec_ = DvceArray1D<Real>("sanity_rec", kSanityRec);
   const std::string convergence = pin->GetOrAddString(
-      "particles", "sink_convergence", reference ? "mass_flux" : "off");
+      "particles", "sink_convergence", "mass_flux");
   if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {
     std::cerr << "Unknown particles/sink_convergence: " << convergence << std::endl;
     std::exit(EXIT_FAILURE);
   }
   sink_convergence = convergence == "off" ? 0 : (convergence == "mass_flux" ? 1 : 2);
-  if (!merge_iterative && (merge_cell_centers || merge_face_contact)) {
-    std::cerr << "Cell/face merger geometry requires merge_iterative=true." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  if (creation && !creation_exclusion && (!merging || !merge_iterative)) {
-    std::cerr << "Creation without exclusion requires iterative merging." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
 
   // particle CFL number (see particles.hpp); 0.5 guarantees <= 1 cell crossed per step
   cfl_par = pin->GetOrAddReal("particles","cfl_par",0.5);
@@ -189,9 +161,8 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     pbval_phi->InitializeBuffers(1);
   }
 
-  // staging buffer + communicator for the cross-rank control-volume reset (MPI). Sized
-  // to hold every reset cell of every sink twice over (new + old CV = 54 cells), which
-  // bounds the off-rank-destined subset; overflow is guarded + warned in the kernel.
+  // Staging buffer + communicator for the cross-rank control-volume reset (MPI).
+  // Capacity covers each sink's 27 reset cells; overflow is guarded + warned in the kernel.
   if (particle_type == ParticleType::sink && accretion) {
     cvemit_max_ = std::max(1, nprtcl_thispack)*64;
     Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
@@ -302,17 +273,17 @@ void Particles::ReportSinkTimers(double wall_seconds) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Particles::ResizeForSeededParticles(int npart_new)
+//! \fn void Particles::ResizeParticles(int npart_new)
 //! \brief Resize the particle arrays to npart_new, grow the buffers that were sized from
 //! the ppc-derived count, and refresh the Mesh's global particle bookkeeping.
 //!
 //! The constructor sizes cvemit_ (the cross-rank control-volume reset staging buffer) as
 //! max(1, nprtcl_thispack)*64 records, from the count ppc implied BEFORE the pgen runs. A
-//! benchmark or IC that seeds sinks explicitly typically runs with ppc = 0, so that
+//! restart or IC that restores/seeds sinks typically runs with ppc = 0, so that
 //! buffer would hold 64 records total no matter how many sinks are seeded. Grow it here,
-//! so a pgen only has to state how many particles it wants.
+//! so the caller only has to state how many particles it needs.
 
-void Particles::ResizeForSeededParticles(int npart_new) {
+void Particles::ResizeParticles(int npart_new) {
   Kokkos::resize(prtcl_rdata, nrdata, npart_new);
   Kokkos::resize(prtcl_idata, nidata, npart_new);
   nprtcl_thispack = npart_new;

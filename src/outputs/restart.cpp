@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <utility> // make_pair
@@ -29,6 +30,7 @@
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "particles/particles.hpp"
 //#include "outputs.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -121,6 +123,43 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
     Kokkos::realloc(outarray_adm, nmb, nadm, nout3, nout2, nout1);
     Kokkos::deep_copy(outarray_adm, Kokkos::subview(padm->u_adm, std::make_pair(0,nmb),
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+  }
+
+  // Sink properties use the same host output arrays for shared and per-rank files.
+  auto *ppart = pm->pmb_pack->ppart;
+  if (ppart != nullptr && ppart->particle_type == ParticleType::sink) {
+    npout = ppart->nprtcl_thispack;
+    Kokkos::realloc(outpart_rdata, ppart->nrdata, npout);
+    Kokkos::realloc(outpart_idata, ppart->nidata, npout);
+    Kokkos::deep_copy(outpart_rdata, ppart->prtcl_rdata);
+    Kokkos::deep_copy(outpart_idata, ppart->prtcl_idata);
+#if MPI_PARALLEL_ENABLED
+    if (!out_params.single_file_per_rank) {
+      auto local_rdata = outpart_rdata;
+      auto local_idata = outpart_idata;
+      const int nlocal = npout;
+      npout = pm->nprtcl_total;
+      std::vector<int> displ(global_variable::nranks);
+      // Sum preceding ranks' counts: [2, 3, 1] gives displacements [0, 2, 5].
+      std::exclusive_scan(pm->nprtcl_eachrank,
+                          pm->nprtcl_eachrank + global_variable::nranks, displ.begin(), 0);
+      const int nrecv = (global_variable::my_rank == 0) ? npout : 0;
+      outpart_rdata = HostArray2D<Real>("rst-part-real", ppart->nrdata, nrecv);
+      outpart_idata = HostArray2D<int>("rst-part-int", ppart->nidata, nrecv);
+      for (int n=0; n<ppart->nrdata; ++n) {
+        auto local = Kokkos::subview(local_rdata, n, Kokkos::ALL);
+        auto global = Kokkos::subview(outpart_rdata, n, Kokkos::ALL);
+        MPI_Gatherv(local.data(), nlocal, MPI_ATHENA_REAL, global.data(),
+                    pm->nprtcl_eachrank, displ.data(), MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+      }
+      for (int n=0; n<ppart->nidata; ++n) {
+        auto local = Kokkos::subview(local_idata, n, Kokkos::ALL);
+        auto global = Kokkos::subview(outpart_idata, n, Kokkos::ALL);
+        MPI_Gatherv(local.data(), nlocal, MPI_INT, global.data(), pm->nprtcl_eachrank,
+                    displ.data(), MPI_INT, 0, MPI_COMM_WORLD);
+      }
+    }
+#endif
   }
 
   // calculate max/min number of MeshBlocks across all ranks
@@ -278,7 +317,33 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final) {
     }
   }
 
-  //--- STEP 4.  All ranks write data over all MeshBlocks (5D arrays) in parallel
+  //--- STEP 4.  Write sink particle state, including the historical creation counter.
+  IOWrapperSizeT particle_size = 0;
+  auto *ppart = pm->pmb_pack->ppart;
+  if (ppart != nullptr && ppart->particle_type == ParticleType::sink) {
+    // Format version, number of sinks, real/integer property counts, creation counter.
+    const int particle_header[5] = {1, npout, ppart->nrdata, ppart->nidata,
+                                    ppart->created_total_};
+    particle_size = sizeof(particle_header) +
+        npout*(ppart->nrdata*sizeof(Real) + ppart->nidata*sizeof(int));
+    if (global_variable::my_rank == 0 || single_file_per_rank) {
+      if (resfile.Write_any_type(particle_header, 5, "int", single_file_per_rank) != 5 ||
+          resfile.Write_any_type(outpart_rdata.data(), outpart_rdata.size(), "Real",
+                                single_file_per_rank) != outpart_rdata.size() ||
+          resfile.Write_any_type(outpart_idata.data(), outpart_idata.size(), "int",
+                                single_file_per_rank) != outpart_idata.size()) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Sink data not written correctly to restart file."
+                  << std::endl;
+#if MPI_PARALLEL_ENABLED
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+        std::exit(EXIT_FAILURE);
+      }
+    }
+  }
+
+  //--- STEP 5.  All ranks write data over all MeshBlocks (5D arrays) in parallel
   // This data read in ProblemGenerator constructor for restarts
 
   // total size of all cell-centered variables and face-centered fields to be written by
@@ -318,9 +383,11 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final) {
   if (pz4c != nullptr) step3size += sizeof(Real);
   if (pturb != nullptr) step3size += sizeof(RNG_State);
 
+  // Common start of MeshBlock field data, after all preceding state sections.
+  const IOWrapperSizeT header_size = step1size + step2size + step3size + particle_size
+                                     + sizeof(IOWrapperSizeT);
   // write cell-centered variables in parallel
-  IOWrapperSizeT offset_myrank = (step1size + step2size + step3size
-                                  + sizeof(IOWrapperSizeT));
+  IOWrapperSizeT offset_myrank = header_size;
 
   if (!single_file_per_rank) {
     offset_myrank += data_size*(pm->gids_eachrank[global_variable::my_rank]);
@@ -637,11 +704,10 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool final) {
     myoffset = offset_myrank;
   }
 
-  //--- STEP 5.  Write cyclic zoom restart data if enabled
+  //--- STEP 6.  Write cyclic zoom restart data if enabled
   if (pm->pzoom != nullptr && pm->pzoom->write_rst) {
     // calculate offset of zoom data, i.e. after all previous data
-    IOWrapperSizeT offset_zoom = step1size + step2size + step3size
-                                 + sizeof(IOWrapperSizeT) + data_size*(pm->nmb_total);
+    IOWrapperSizeT offset_zoom = header_size + data_size*(pm->nmb_total);
     pm->pzoom->WriteRestartFile(resfile, offset_zoom, single_file_per_rank);
   }
 

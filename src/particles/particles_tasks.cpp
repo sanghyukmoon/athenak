@@ -123,18 +123,13 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.recvp  = tl["stagen"]->AddTask(&Particles::RecvP, this, id.sendp);
     id.crecv  = tl["stagen"]->AddTask(&Particles::ClearRecv, this, id.recvp);
     id.csend  = tl["stagen"]->AddTask(&Particles::ClearSend, this, id.crecv);
-    // Refresh the particle timestep every cycle from the end-of-cycle velocities
-    // (dtnew was previously seeded once at t=0 by the pgens -- a latent bug once
-    // particle speeds grow, e.g. under accretion). After the migration chain, so
-    // arrivals contribute on their new rank.
-    id.newdt  = tl["stagen"]->AddTask(&Particles::NewTimeStep, this, id.csend);
 
     // operator-split sink physics at the last RK stage, ordered create -> merge ->
-    // accrete. Each stage is opt-in and chained onto the previous one so it runs only
-    // when enabled; orbit/gravity tests with inert or no gas skip all three.
+    // accrete. Creation and accretion follow their flags; merging always runs and
+    // completes survivor migration before accretion.
     //   create  (<particles>/creation) : new sinks are massless; the AccreteMass reset
     //           that follows seeds them conservatively (Moon & Ostriker 2025 eq. 54).
-    //   merge   (<particles>/merging)  : combine sinks whose 27-cell halos overlap, so
+    //   merge                       : combine overlapping/face-touching CVs, so
     //           AccreteMass never sees overlapping control volumes.
     //   accrete (<particles>/accretion): control-volume gas -> sink.
     // release the potential exchange's buffers once the stage is done with them
@@ -151,22 +146,20 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
       id.create = tl["after_stagen"]->AddTask(&Particles::CreateSinks, this, dep);
       dep = id.create;
     }
-    if (merging) {
-      id.merge = tl["after_stagen"]->AddTask(&Particles::MergeSinks, this, dep);
-      dep = id.merge;
-      if (merge_iterative) {
-        dep = tl["after_stagen"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::SendCnt, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::InitRecv, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::SendP, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::RecvP, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::ClearRecv, this, dep);
-        dep = tl["after_stagen"]->AddTask(&Particles::ClearSend, this, dep);
-      }
-    }
+    id.merge = tl["after_stagen"]->AddTask(&Particles::MergeSinks, this, dep);
+    dep = id.merge;
+    dep = tl["after_stagen"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::SendCnt, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::InitRecv, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::SendP, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::RecvP, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::ClearRecv, this, dep);
+    dep = tl["after_stagen"]->AddTask(&Particles::ClearSend, this, dep);
     if (accretion) {
       id.accrete = tl["after_stagen"]->AddTask(&Particles::AccreteMass, this, dep);
+      dep = id.accrete;
     }
+    id.newdt = tl["after_stagen"]->AddTask(&Particles::NewTimeStep, this, dep);
   } else {
     // Tracer / cosmic-ray (drift) particles: integrated once per cycle in the
     // "before_timeintegrator" task list (no gravity coupling).

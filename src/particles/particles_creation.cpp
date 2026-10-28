@@ -15,21 +15,18 @@
 //!      threshold is so high that random compression essentially never reaches it
 //!      without collapse, and the potential-minimum condition alone rejects
 //!      disk-fragmentation false positives.
-//! A candidate is also rejected within 2(rctrl+1) cells of an existing sink (the
-//! reference merges overlapping control volumes instead; merging is a follow-up).
+//! Nearby candidates are handled by the subsequent control-volume merger.
 //!
-//! The new particle is created MASSLESS at the cell centre with the local gas
-//! velocity. The AccreteMass task that runs immediately afterwards (same task list,
+//! The new particle is created MASSLESS at the cell centre with zero velocity. The AccreteMass task that runs immediately afterwards (same task list,
 //! ordered dependency) resets the new control volume and conservatively dumps
 //! Delta M_sink = -Delta M_reset into the particle [M&O eq. 54] -- so the sink's
 //! initial mass/momentum are exactly the LP-core excess over the reset state, with
 //! no double counting and machine-precision total-mass conservation.
 //!
 //! Creation runs once per step (last RK stage), before accretion. Particle arrays
-//! are resized on the host (Kokkos::resize preserves contents); serial/on-rank.
+//! are resized on the host (Kokkos::resize preserves contents); tags are global.
 
 #include <cstdio>
-#include <iostream>
 #include <vector>
 
 #include "athena.hpp"
@@ -51,7 +48,7 @@
 namespace particles {
 
 namespace {
-constexpr int MAX_NEW_SINKS = 32;   // per pack per step (host warns on overflow)
+constexpr int MAX_NEW_SINKS = 32;   // initial per-pack candidate capacity
 }
 
 //----------------------------------------------------------------------------------------
@@ -76,8 +73,6 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   // rho_thr = (8.86/pi) c_s^2/(G dx^2) with G = fpg/(4 pi)  ->  35.44 c_s^2/(fpg dx^2)
   const Real thr_fac = 4.0*8.86*cs*cs/fpg;
 
-  auto &pr = prtcl_rdata;
-  auto &pi = prtcl_idata;
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int is = indcs.is, ie = indcs.ie;
@@ -87,10 +82,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   const int gids = pmy_pack->gids;
   const int nmb = pmy_pack->nmb_thispack;
   const int npart = nprtcl_thispack;
-  const int rctrl = 1;
 
-  const bool zero_velocity = creation_zero_velocity;
-  const bool use_exclusion = creation_exclusion;
   const int convergence = sink_convergence;
   const bool finest_only = creation_finest_only;
   const int max_level = pmy_pack->pmesh->max_level;
@@ -127,19 +119,6 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
         }
       }
     }
-    // not too close to an existing sink (reference merges overlapping CVs instead)
-    const Real xc = mbsize.d_view(m).x1min + (static_cast<Real>(i-is) + 0.5)*dx1;
-    const Real yc = mbsize.d_view(m).x2min +
-                    (static_cast<Real>(j-js) + 0.5)*mbsize.d_view(m).dx2;
-    const Real zc = mbsize.d_view(m).x3min +
-                    (static_cast<Real>(k-ks) + 0.5)*mbsize.d_view(m).dx3;
-    const Real dmin = 2.0*(rctrl + 1)*dx1;
-    for (int p = 0; use_exclusion && p < npart; ++p) {
-      const Real ddx = pr(IPX, p) - xc;
-      const Real ddy = pr(IPY, p) - yc;
-      const Real ddz = pr(IPZ, p) - zc;
-      if (ddx*ddx + ddy*ddy + ddz*ddz < dmin*dmin) return;
-    }
     const int slot = Kokkos::atomic_fetch_add(&ncand_d(0), 1);
     if (slot < capacity) {
       cand(slot, 0) = m; cand(slot, 1) = k; cand(slot, 2) = j; cand(slot, 3) = i;
@@ -153,42 +132,10 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   int nnew = ncand_h(0);
   // NOTE: no early return for nnew == 0. Every rank must reach the tag-numbering
   // collective below, and the loops between here and there are no-ops when nnew is 0.
-  if (nnew > MAX_NEW_SINKS && !use_exclusion) {
+  if (nnew > MAX_NEW_SINKS) {
     Kokkos::realloc(cand, nnew, 4);
     Kokkos::deep_copy(ncand_d, 0);
     scan(nnew);
-  } else if (nnew > MAX_NEW_SINKS) {
-    if (global_variable::my_rank == 0) std::cout
-        << "### WARNING: legacy creation candidates capped at " << MAX_NEW_SINKS
-        << std::endl;
-    nnew = MAX_NEW_SINKS;
-  }
-
-  // host-side dedupe of same-step candidates closer than the exclusion radius
-  auto cand_h = Kokkos::create_mirror_view(cand);
-  Kokkos::deep_copy(cand_h, cand);
-  auto msz_h = pmy_pack->pmb->mb_size.h_view;
-  std::vector<Real> cx(nnew), cy(nnew), cz(nnew);
-  std::vector<bool> keep(nnew);
-  for (int n = 0; n < nnew; ++n) {
-    const int m = cand_h(n, 0), k = cand_h(n, 1), j = cand_h(n, 2), i = cand_h(n, 3);
-    cx[n] = msz_h(m).x1min + (static_cast<Real>(i-is) + 0.5)*msz_h(m).dx1;
-    cy[n] = msz_h(m).x2min + (static_cast<Real>(j-js) + 0.5)*msz_h(m).dx2;
-    cz[n] = msz_h(m).x3min + (static_cast<Real>(k-ks) + 0.5)*msz_h(m).dx3;
-    keep[n] = true;
-  }
-  for (int n = 0; n < nnew; ++n) {
-    if (!keep[n]) continue;
-    for (int q = n+1; q < nnew; ++q) {
-      const Real dmin = 2.0*(rctrl + 1)*msz_h(cand_h(n,0)).dx1;
-      const Real d2 = (cx[n]-cx[q])*(cx[n]-cx[q]) + (cy[n]-cy[q])*(cy[n]-cy[q]) +
-                      (cz[n]-cz[q])*(cz[n]-cz[q]);
-      if (use_exclusion && d2 < dmin*dmin) keep[q] = false;
-    }
-  }
-  int nkeep = 0;
-  for (int n = 0; n < nnew; ++n) {
-    if (keep[n]) ++nkeep;
   }
 
   // ---- globally unique tags ------------------------------------------------------
@@ -200,16 +147,16 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   // summed their masses, and every rank wrote the sum back onto its own copy, doubling
   // the sink mass EVERY cycle (observed: 9.8 -> 1e72 over ~230 cycles).
   // Fix: number this step's new sinks from a global base. Each rank takes the block
-  // [1 + created_total_ + offset, ... + nkeep), where offset is the exclusive prefix sum of
-  // nkeep over lower ranks, and every rank then advances created_total_ by the GLOBAL
+  // [1 + created_total_ + offset, ... + nnew), where offset is the exclusive prefix sum of
+  // nnew over lower ranks, and every rank then advances created_total_ by the GLOBAL
   // total so the counters never drift apart and no later step can collide either.
   // The collective is unconditional -- it must be reached even by ranks creating
-  // nothing, hence no early return above (the nkeep <= 0 exit is below it).
-  int tag_offset = 0, ncreated_global = nkeep;
+  // nothing, hence no early return above (the nnew <= 0 exit is below it).
+  int tag_offset = 0, ncreated_global = nnew;
 #if MPI_PARALLEL_ENABLED
   if (global_variable::nranks > 1) {
     std::vector<int> nk(global_variable::nranks, 0);
-    MPI_Allgather(&nkeep, 1, MPI_INT, nk.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(&nnew, 1, MPI_INT, nk.data(), 1, MPI_INT, MPI_COMM_WORLD);
     tag_offset = 0;
     for (int r = 0; r < global_variable::my_rank; ++r) tag_offset += nk[r];
     ncreated_global = 0;
@@ -219,7 +166,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   const int tag0 = 1 + created_total_ + tag_offset;
   created_total_ += ncreated_global;
 
-  if (nkeep <= 0) {
+  if (nnew <= 0) {
     // This rank created nothing, but another rank may have: RefreshMeshParticleCounts is
     // collective, so it is keyed off the GLOBAL count (identical on every rank) rather
     // than the local one, which would deadlock.
@@ -228,35 +175,34 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   }
 
   // ---- grow the particle arrays (Kokkos::resize preserves existing columns) ----
-  const int npart_new = npart + nkeep;
+  const int npart_new = npart + nnew;
   Kokkos::resize(prtcl_rdata, nrdata, npart_new);
   Kokkos::resize(prtcl_idata, nidata, npart_new);
   auto &prn = prtcl_rdata;
   auto &pin_ = prtcl_idata;
 
-  // fill new slots: massless at the candidate cell centre, local gas velocity; the
-  // AccreteMass reset that follows seeds mass/momentum conservatively (M&O eq. 54)
-  DvceArray2D<int> cnew("cnew", nkeep, 4);
-  auto cnew_h = Kokkos::create_mirror_view(cnew);
-  int q = 0;
+  // Fill new slots: massless at the candidate cell centre with zero velocity; the
+  // AccreteMass reset that follows seeds mass/momentum conservatively (M&O eq. 54).
+  auto cand_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cand);
+  auto msz_h = pmy_pack->pmb->mb_size.h_view;
   for (int n = 0; n < nnew; ++n) {
-    if (!keep[n]) continue;
-    for (int c = 0; c < 4; ++c) cnew_h(q, c) = cand_h(n, c);
+    const int m = cand_h(n, 0), k = cand_h(n, 1), j = cand_h(n, 2), i = cand_h(n, 3);
+    const Real x = msz_h(m).x1min + (static_cast<Real>(i-is) + 0.5)*msz_h(m).dx1;
+    const Real y = msz_h(m).x2min + (static_cast<Real>(j-js) + 0.5)*msz_h(m).dx2;
+    const Real z = msz_h(m).x3min + (static_cast<Real>(k-ks) + 0.5)*msz_h(m).dx3;
     // Print on the CREATING rank, and report the global TAG rather than a local slot
     // index: rank-0-only prints hide every sink born on another rank, and the tag is what
     // the merger and the history output key on (a duplicated tag is a real bug -- see the
     // tag-numbering comment above).
     std::printf("CreateSinks: new sink tag=%d on rank %d at (%.5f, %.5f, %.5f) "
                 "cycle=%d\n",
-                tag0 + q, global_variable::my_rank, cx[n], cy[n], cz[n],
+                tag0 + n, global_variable::my_rank, x, y, z,
                 pmy_pack->pmesh->ncycle);
-    ++q;
   }
-  Kokkos::deep_copy(cnew, cnew_h);
 
-  par_for("sink_create_fill", DevExeSpace(), 0, nkeep-1,
+  par_for("sink_create_fill", DevExeSpace(), 0, nnew-1,
   KOKKOS_LAMBDA(const int n) {
-    const int m = cnew(n, 0), k = cnew(n, 1), j = cnew(n, 2), i = cnew(n, 3);
+    const int m = cand(n, 0), k = cand(n, 1), j = cand(n, 2), i = cand(n, 3);
     const int p = npart + n;
     const Real x = mbsize.d_view(m).x1min
                    + (static_cast<Real>(i-is) + 0.5)*mbsize.d_view(m).dx1;
@@ -264,11 +210,10 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
                    + (static_cast<Real>(j-js) + 0.5)*mbsize.d_view(m).dx2;
     const Real z = mbsize.d_view(m).x3min
                    + (static_cast<Real>(k-ks) + 0.5)*mbsize.d_view(m).dx3;
-    const Real rho = u0(m, IDN, k, j, i);
     prn(IPX, p) = x;  prn(IPY, p) = y;  prn(IPZ, p) = z;
-    prn(IPVX, p) = zero_velocity ? 0.0 : u0(m, IM1, k, j, i)/rho;
-    prn(IPVY, p) = zero_velocity ? 0.0 : u0(m, IM2, k, j, i)/rho;
-    prn(IPVZ, p) = zero_velocity ? 0.0 : u0(m, IM3, k, j, i)/rho;
+    prn(IPVX, p) = 0.0;
+    prn(IPVY, p) = 0.0;
+    prn(IPVZ, p) = 0.0;
     prn(IPM, p) = 0.0;
     prn(IPGX, p) = 0.0; prn(IPGY, p) = 0.0; prn(IPGZ, p) = 0.0;
     prn(IPX0, p) = x; prn(IPY0, p) = y; prn(IPZ0, p) = z;

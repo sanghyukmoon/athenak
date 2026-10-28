@@ -118,36 +118,21 @@ class Particles {
   // with inert/no gas never execute the accretion kernel.
   bool accretion = false;
 
-  // Enable sink creation (<particles>/creation, default false): cells exceeding the
+  // Enable sink creation (<particles>/creation, default true): cells exceeding the
   // Larson-Penston density threshold at a local potential minimum spawn a massless
   // sink that the next AccreteMass reset seeds conservatively (Moon & Ostriker 2025
   // section 3.4). Requires accretion = true.
-  bool creation = false;
+  bool creation = true;
   // Optional AMR experiment: retain the uniform finest-grid creation threshold.
   bool creation_finest_only = false;
   int created_total_ = 0;   // running count, for unique tags
 
-  // Enable sink-sink merging (<particles>/merging, default false): two sinks whose
-  // 27-cell control volumes (halos) overlap are combined into one, conserving mass and
+  // Sink-sink merging is unconditional: sinks whose 27-cell control volumes overlap
+  // or share a face are combined, conserving mass and
   // linear momentum. Independent of accretion (a decaying gravitational binary can merge
   // with accretion off), but typically used with it -- merging removes the overlapping
   // control volumes that AccreteMass cannot otherwise handle, so it is ordered
   // create -> merge -> accrete. See particles_merger.cpp.
-  bool merging = false;
-  // Require the overlapping pair to be gravitationally bound before merging
-  // (<particles>/merge_bound, default false): 0.5*mu*|dv|^2 - G*m_a*m_b/r < 0. Rejects
-  // unbound fly-bys that momentarily pass within the halo. Set false to merge on halo
-  // overlap alone. Needs the gravity module; falls back to overlap-only (one-time
-  // warning) if <gravity> is absent.
-  bool merge_bound = false;
-  // Reference defaults; sink_setup=legacy restores the previous defaults.
-  bool merge_iterative = true;
-  bool merge_cell_centers = true;
-  bool merge_face_contact = false;
-  bool creation_exclusion = false;
-  bool creation_zero_velocity = true;
-  bool accrete_old_position = false;
-  bool reject_negative_accretion = true;
   int sink_convergence = 1;  // 0: off; 1: directional mass flux; 2: velocity gradient
 
   // Sink sanity check (<particles>/sanity_vmax, default 0 = off). When > 0, every step
@@ -242,12 +227,9 @@ class Particles {
   void RefreshMeshParticleCounts();  // after pgen-side array resize
   // Resize the particle arrays to npart_new and, with them, every buffer that was sized
   // from the ppc-derived count in the constructor, then refresh the Mesh's bookkeeping.
-  // A pgen that seeds MORE particles than ppc implied must use this rather than a bare
-  // Kokkos::resize: cvemit_ is allocated as nprtcl_thispack*64 records, so a ppc = 0
-  // (creation-mode) run that then seeds N sinks would leave the cross-rank control-volume
-  // staging buffer 64 records deep for every sink on the rank. The overflow is guarded
-  // and warned rather than silent, but the reset it drops is gas that never gets removed.
-  void ResizeForSeededParticles(int npart_new);
+  // Use this when restoring or seeding particles rather than a bare Kokkos::resize,
+  // so a population larger than ppc implied also gets sufficient reset staging storage.
+  void ResizeParticles(int npart_new);
   void AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
   TaskStatus SetGIDFromPosition(Driver *pdriver, int stage);
   void ReconcileOwnership(Driver *pdriver, int stage);  // setgid + cross-rank migration

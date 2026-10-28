@@ -16,11 +16,7 @@
 //!        reset faces)
 //!   1(c) re-integrate -> M^{n+1}_ctrl
 //!   1(d) dM_sink = M^{n+1} - M^{n+1}_ctrl  (exactly the flux that entered the volume)
-//!   2    if the sink moved to a new cell this step, repeat 1(a)-(d) on the OLD control
-//!        volume (centred on the start-of-step position IPX0/IPY0/IPZ0) and add its
-//!        difference -- conserves mass/momentum through cell crossings (the overlap
-//!        region is deliberately re-reset; see reference comments).
-//!   3    dump conservatively onto the sink: v <- (m v + dM)/(m + dm), m <- m + dm.
+//!   2    dump conservatively onto the sink: v <- (m v + dM)/(m + dm), m <- m + dm.
 //!
 //! Kernel structure: ONE team, serial loop over sinks, team-parallel inner loops. The
 //! reference semantics are strictly sequential across sinks (a later sink's integral
@@ -158,13 +154,12 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const int is = indcs.is, ie = indcs.ie;
   const int js = indcs.js, je = indcs.je;
   const int ks = indcs.ks, ke = indcs.ke;
+  const int ng = indcs.ng;
   const int ncells1 = indcs.nx1 + 2*indcs.ng;
   const int ncells2 = indcs.nx2 + 2*indcs.ng;
   const int ncells3 = indcs.nx3 + 2*indcs.ng;
   const int gids = pmy_pack->gids;
   const int npart = nprtcl_thispack;
-  const bool old_position = accrete_old_position;
-  const bool reject_negative = reject_negative_accretion;
   const int convergence = sink_convergence;
   const int rctrl = 1;      // control volume = (2*rctrl+1)^3 = 27 cells (paper standard)
   const int nmb_ = pmy_pack->nmb_thispack;
@@ -195,16 +190,10 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   // ONE TEAM PER SINK within each colour, instead of one team looping every sink -- which
   // occupied a single SM regardless of how many sinks there were.
   //
-  // Conflict radius, from the kernel's own reach numbers:
-  //   write region = the 27 cells of the new CV, union the old CV whose centre is at most
-  //                  one cell away             -> half-width rctrl+1 = 2 cells
-  //   read region  = the extrapolation stencil, rctrl+1 from a CV centre, plus the same
-  //                  one-cell crossing offset  -> half-width 3 cells
-  // A conflict is write(A)-read(B) or write(A)-write(B), so |dx| < 2+3 = 5 cells, i.e.
-  // half-widths of 2.5 dx each. When a sink's reach touches a COARSER neighbour its
-  // writes round outward to the containing coarse cell, widening the write region to 3
-  // cells; 3.5 dx is used there, which also guarantees two same-colour sinks can never
-  // accumulate into the same coarse cell (the coarser-target += is not idempotent).
+  // Keep conservative conflict half-widths of 2.5 dx per sink, covering the control
+  // volume and extrapolation stencil. Use 3.5 dx near COARSER neighbours to cover
+  // writes rounded outward to coarse cells and prevent concurrent accumulation
+  // into the same coarse cell (the coarser-target += is not idempotent).
   //
   // Colours are assigned by LAYERING, not greedy: colour[j] = 1 + max(colour[i]) over
   // conflicting i < j. That guarantees colour(j) > colour(i) for every conflicting pair
@@ -320,7 +309,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       const Real dx3 = mbsize.d_view(m).dx3;
       const Real dV = dx1*dx2*dx3;
 
-      // cell containing the sink now and at the start of the step -- guard the
+      // Cell containing the sink -- guard the
       // double->int conversions against non-finite/wild positions (UB otherwise),
       // and use floor (truncation is wrong for fractional offsets in (-1,0)).
       // BIN IN THE GLOBAL MESH FRAME, then convert to the owner-local index: block-frame
@@ -331,12 +320,8 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       const Real xi1 = (pr(IPX, p) - msz.x1min)/dx1;
       const Real xi2 = (pr(IPY, p) - msz.x2min)/dx2;
       const Real xi3 = (pr(IPZ, p) - msz.x3min)/dx3;
-      const Real yi1 = (pr(IPX0, p) - msz.x1min)/dx1;
-      const Real yi2 = (pr(IPY0, p) - msz.x2min)/dx2;
-      const Real yi3 = (pr(IPZ0, p) - msz.x3min)/dx3;
       if (!(xi1 > -1.0e9 && xi1 < 1.0e9) || !(xi2 > -1.0e9 && xi2 < 1.0e9) ||
-          !(xi3 > -1.0e9 && xi3 < 1.0e9) || !(yi1 > -1.0e9 && yi1 < 1.0e9) ||
-          !(yi2 > -1.0e9 && yi2 < 1.0e9) || !(yi3 > -1.0e9 && yi3 < 1.0e9)) {
+          !(xi3 > -1.0e9 && xi3 < 1.0e9)) {
         return;
       }
       // owner block's integer cell offset from the mesh origin (exact by construction:
@@ -347,30 +332,13 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       const int ip  = static_cast<int>(Kokkos::floor(xi1)) - off1 + is;
       const int jp  = static_cast<int>(Kokkos::floor(xi2)) - off2 + js;
       const int kp  = static_cast<int>(Kokkos::floor(xi3)) - off3 + ks;
-      const int ip0 = static_cast<int>(Kokkos::floor(yi1)) - off1 + is;
-      const int jp0 = static_cast<int>(Kokkos::floor(yi2)) - off2 + js;
-      const int kp0 = static_cast<int>(Kokkos::floor(yi3)) - off3 + ks;
 
       // ---- eligibility gate --------------------------------------------------------
-      // The region this sink touches (new + old control volumes and their extrapolation
-      // reads) spans at most rctrl+2.5 cells from the CURRENT sink position. Level jumps
-      // in that region are HANDLED (see the level rule in the file comment), so the only
-      // reasons to bail out are defensive: a level jump of more than one, which proper
-      // nesting forbids and whose scatter factors are not derived here. Off-rank
-      // neighbours within reach set touches_offrank, which stages this sink's reset cells
-      // for ExchangeCVReset. (Computed redundantly by every team thread; all take
-      // identical branches.)
+      // Level jumps of more than one violate proper nesting and are not handled.
+      // Stage resets when they can reach an off-rank neighbour's interior or ghosts.
+      // (Computed redundantly by every team thread; all take identical branches.)
       const int mylev = mblev.d_view(m);
       const Real xs = pr(IPX, p), ys = pr(IPY, p), zs = pr(IPZ, p);
-      const Real h1 = (rctrl + 2.5)*dx1, h2 = (rctrl + 2.5)*dx2, h3 = (rctrl + 2.5)*dx3;
-      // proximity of the sink to any owner face, i.e. "the reach leaves this block".
-      // Used for off-rank neighbours, whose boxes are not addressable on the device.
-      const bool near_face = (xs - mbsize.d_view(m).x1min < h1) ||
-                             (mbsize.d_view(m).x1max - xs < h1) ||
-                             (ys - mbsize.d_view(m).x2min < h2) ||
-                             (mbsize.d_view(m).x2max - ys < h2) ||
-                             (zs - mbsize.d_view(m).x3min < h3) ||
-                             (mbsize.d_view(m).x3max - zs < h3);
       bool eligible = true;
       for (int n = 0; n < nnghbr; ++n) {
         if (nghbr.d_view(m,n).gid < 0) continue;
@@ -378,7 +346,17 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         if (dlev > 1 || dlev < -1) {   // proper nesting violated: refuse to guess
           eligible = false; break;
         }
-        if (nghbr.d_view(m,n).rank != my_rank && near_face) touches_offrank = true;
+        if (nghbr.d_view(m,n).rank != my_rank) {
+          // Coarse ghosts are twice as wide; owner spacing also bounds finer ghosts.
+          const int reach = rctrl + ng*(dlev < 0 ? 2 : 1);
+          const Real h1 = reach*dx1, h2 = reach*dx2, h3 = reach*dx3;
+          if ((xs - mbsize.d_view(m).x1min <= h1) ||
+              (mbsize.d_view(m).x1max - xs <= h1) ||
+              (ys - mbsize.d_view(m).x2min <= h2) ||
+              (mbsize.d_view(m).x2max - ys <= h2) ||
+              (zs - mbsize.d_view(m).x3min <= h3) ||
+              (mbsize.d_view(m).x3max - zs <= h3)) touches_offrank = true;
+        }
       }
       if (!eligible) {
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
@@ -397,8 +375,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       // (executed collectively by the whole team; all threads take identical branches)
       auto process_cv = [&](const int ic, const int jc, const int kc) {
         // hard array-bounds guard for the read stencil (reaches rctrl+1 from the CV
-        // centre); with nghost >= rctrl+2 this passes for any validly binned sink,
-        // including old-CV centres one cell into the ghost region after a crossing.
+        // centre); with nghost >= rctrl+2 this passes for any validly binned sink.
         // Counted like the eligibility skips: bailing out here also means this sink
         // stops accreting, which must not happen silently.
         if (ic < rctrl+1 || ic > ncells1-rctrl-2 ||
@@ -411,7 +388,12 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         }
 
         if (!SinkConverging(u0, m, ic, jc, kc, pr(IPVX,p), pr(IPVY,p),
-                            pr(IPVZ,p), convergence)) return;
+                            pr(IPVZ,p), convergence)) {
+          if (pr(IPM,p) == 0.0) {
+            Kokkos::abort("Massless sink failed convergence in AccreteMass.");
+          }
+          return;
+        }
 
         // Step (a): integrate conserved vars over the 27 cells (pre-reset), and
         // Step (b): compute the 26 shell reset values into scratch from pre-reset u0.
@@ -457,7 +439,10 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
         // read identical scratch values and take the same branch.
         Real reset_mass = 0.0;
         for (int c = 0; c < 27; ++c) reset_mass += scr(0,c);
-        if (reject_negative && reset_mass > s1[0]) return;
+        if (pr(IPM,p) == 0.0 && !((s1[0]-reset_mass)*dV > 0.0)) {
+          Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
+        }
+        if (reset_mass > s1[0]) return;
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
           for (int v=0; v<4; ++v) {
             Real s2=0.0;
@@ -655,16 +640,10 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       };
       // -----------------------------------------------------------------------------
 
-      // Step 1: the current control volume
+      // Reset the current control volume.
       process_cv(ip, jp, kp);
-      // Step 2: the old control volume, if the sink crossed a cell boundary this step
-      // (sequential after Step 1; the overlap region is deliberately re-reset and its
-      // additional change accounted, per the reference)
-      if (old_position && (ip != ip0 || jp != jp0 || kp != kp0)) {
-        process_cv(ip0, jp0, kp0);
-      }
 
-      // Step 3: conservative update of the sink mass and velocity
+      // Conservative update of the sink mass and velocity.
       Kokkos::single(Kokkos::PerTeam(tm), [&]() {
         const Real mp = pr(IPM, p);
         const Real mnew = mp + acc(0);
@@ -846,8 +825,7 @@ void Particles::ExchangeCVReset() {
     MPI_Alltoall(nsend.data(), 1, MPI_INT, nrecv.data(), 1, MPI_INT, mpi_comm_cvscat_);
   }
 
-  // pack sends contiguously per destination rank (stable order: preserves the emit
-  // order, so the old-CV overlap re-reset correctly supersedes the new-CV values)
+  // Pack sends contiguously per destination rank, preserving emission order.
   std::vector<int> soff(nranks, 0), sacc(nranks, 0);
   for (int r = 1; r < nranks; ++r) soff[r] = soff[r-1] + nsend[r-1];
   const int ntot_send = soff[nranks-1] + nsend[nranks-1];
@@ -896,9 +874,8 @@ void Particles::ExchangeCVReset() {
   // apply on the device with the SAME geometric scatter as the on-rank path: for each
   // received cell, write every local coincident copy -- any local block whose
   // interior+ghost array contains the (wrapped) position, interior or ghost alike.
-  // Parallel over blocks, serial over records within a block: preserves the record
-  // order so an old-CV overlap re-reset supersedes the new-CV value (no write race --
-  // different blocks write disjoint arrays).
+  // Parallel over blocks, serial over records within a block: preserves record order
+  // without write races, since different blocks write disjoint arrays.
   const bool is_mhd = (pmy_pack->pmhd != nullptr);
   auto u0 = is_mhd ? pmy_pack->pmhd->u0 : pmy_pack->phydro->u0;
   auto w0 = is_mhd ? pmy_pack->pmhd->w0 : pmy_pack->phydro->w0;
