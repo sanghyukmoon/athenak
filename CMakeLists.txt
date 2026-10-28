@@ -4,6 +4,7 @@
 
 cmake_minimum_required(VERSION 3.10)
 project(athena VERSION 0.1 LANGUAGES C CXX)
+include(CheckIncludeFileCXX)
 
 # Disable in-source builds to prevent source tree corruption.
 if( "${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}" )
