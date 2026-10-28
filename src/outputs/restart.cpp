@@ -13,7 +13,6 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <numeric>
 #include <sstream>
 #include <string>
 #include <utility> // make_pair
@@ -139,10 +138,11 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
       auto local_idata = outpart_idata;
       const int nlocal = npout;
       npout = pm->nprtcl_total;
-      std::vector<int> displ(global_variable::nranks);
+      std::vector<int> displ(global_variable::nranks, 0);
       // Sum preceding ranks' counts: [2, 3, 1] gives displacements [0, 2, 5].
-      std::exclusive_scan(pm->nprtcl_eachrank,
-                          pm->nprtcl_eachrank + global_variable::nranks, displ.begin(), 0);
+      for (int r=1; r<global_variable::nranks; ++r) {
+        displ[r] = displ[r-1] + pm->nprtcl_eachrank[r-1];
+      }
       const int nrecv = (global_variable::my_rank == 0) ? npout : 0;
       outpart_rdata = HostArray2D<Real>("rst-part-real", ppart->nrdata, nrecv);
       outpart_idata = HostArray2D<int>("rst-part-int", ppart->nidata, nrecv);
