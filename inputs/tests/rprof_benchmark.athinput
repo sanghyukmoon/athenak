@@ -30,7 +30,7 @@ nx3 = 64
 evolution = dynamic
 integrator = rk2       # time integration algorithm
 cfl_number = 0.3
-nlim       = 100        # cycle limit
+nlim       = 50        # cycle limit
 tlim       = 9999       # time limit
 
 <mhd>
@@ -40,7 +40,7 @@ reconstruct     = plm
 iso_sound_speed = 1.0
 
 <problem>
-rmax = 0.5
+rmax = 0.125
 nbins_subcell_corrected = 4
 nsub = 4
 num_centers = 50
