@@ -100,7 +100,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 #else
   G = std::move(loc);
 #endif
-  if (Ntot < 2) return refresh_return();
 
   // ---- PTAGs must be globally unique --------------------------------------------------
   // Everything below keys survivors and absorbed sinks by tag, so two distinct sinks
@@ -154,6 +153,25 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     } else if (s.changed) {
       survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
     }
+  }
+  // Publish even an empty, single-particle or unchanged survivor list. Migration may
+  // reorder local particles afterward; this snapshot stays immutable through accretion.
+  if (accretion) {
+    const int nsurv = Ntot - static_cast<int>(absorbed.size());
+    Kokkos::realloc(global_prtcl_rdata, IPM+1, nsurv);
+    Kokkos::realloc(global_prtcl_tags, nsurv);
+    auto gr = Kokkos::create_mirror_view(global_prtcl_rdata);
+    auto gt = Kokkos::create_mirror_view(global_prtcl_tags);
+    int p = 0;
+    for (const auto &s : sinks) {
+      if (!s.alive) continue;
+      gr(IPX,p)=s.x[0];   gr(IPY,p)=s.x[1];   gr(IPZ,p)=s.x[2];
+      gr(IPVX,p)=s.v[0];  gr(IPVY,p)=s.v[1];  gr(IPVZ,p)=s.v[2];
+      gr(IPM,p)=s.mass;   gt(p)=s.tag;
+      ++p;
+    }
+    Kokkos::deep_copy(global_prtcl_rdata, gr);
+    Kokkos::deep_copy(global_prtcl_tags, gt);
   }
   if (absorbed.empty()) return refresh_return();
   if (my_rank==0) std::printf("MergeSinks: iterative removed %zu sinks cycle=%d\n",

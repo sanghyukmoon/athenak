@@ -93,6 +93,9 @@ class Particles {
   int nrdata, nidata;
   DvceArray2D<Real> prtcl_rdata;   // real number properties each particle (x,v,etc.)
   DvceArray2D<int>  prtcl_idata;   // integer properties each particle (gid, tag, etc.)
+  // Immutable post-merger snapshot for this step's accretion; not restart state.
+  DvceArray2D<Real> global_prtcl_rdata;  // rows IPX through IPM
+  DvceArray1D<int> global_prtcl_tags;
   // Particle timestep constraint, consumed by Mesh::NewTimeStep as dt = min(dt, dtnew).
   // Initialised to "no constraint" in the constructor. It MUST have a defined value from
   // the moment the module exists: with <particles>/ppc = 0 (creation-driven runs) there
