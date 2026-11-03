@@ -7,6 +7,7 @@
 //! \brief functions that control Particles tasks stored in tasklists in MeshBlockPack
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -625,6 +626,7 @@ TaskStatus Particles::ClearRecv(Driver *pdrive, int stage) {
 TaskStatus Particles::NewTimeStep(Driver *pdriver, int stage) {
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;  // once per cycle
   CheckSinkSanity("timestep", stage);
+  dtnew = std::numeric_limits<Real>::max();
   if (nprtcl_thispack <= 0) return TaskStatus::complete;
 
   auto &pr = prtcl_rdata;
@@ -649,7 +651,6 @@ TaskStatus Particles::NewTimeStep(Driver *pdriver, int stage) {
   if (max_vdx > 0.0) {
     dtnew = cfl_par/max_vdx;
   }
-  // else: all particles at rest -- keep the previous (or pgen-seeded) dtnew
 
   return TaskStatus::complete;
 }
