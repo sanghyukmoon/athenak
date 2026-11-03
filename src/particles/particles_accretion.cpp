@@ -18,80 +18,16 @@
 //!   1(d) dM_sink = M^{n+1} - M^{n+1}_ctrl  (exactly the flux that entered the volume)
 //!   2    dump conservatively onto the sink: v <- (m v + dM)/(m + dm), m <- m + dm.
 //!
-//! Kernel structure: ONE team, serial loop over sinks, team-parallel inner loops. The
-//! reference semantics are strictly sequential across sinks (a later sink's integral
-//! must see an earlier sink's reset, or overlapping control volumes double-accrete), so
-//! sinks are processed in order; each 27-cell phase is team-parallel. Reset values are
-//! computed into team scratch from the pre-reset u0 (shell cells read only outside-CV
-//! cells; the centre reads the 6 scratch faces), which makes the re-integration 1(c)
-//! free (sum of scratch) and removes all write-ordering hazards.
+//! Every overlapping finest-level MeshBlock evaluates the complete reset from the
+//! immutable global survivor list and writes only its own active cells. Surviving
+//! control volumes have disjoint write/read stencils under the integer merger rule.
+//! Ghosts remain read-only here and are refreshed by the native gas boundary tasks.
+//! The particle owner alone receives the full-volume mass and momentum difference.
 //!
-//! CROSS-BLOCK control volumes: all reads (control volume + extrapolation stencil,
-//! <= rctrl+1 cells from the sink cell) come from the OWNER block's array -- valid in
-//! its ghost zones, which hold post-update neighbour interiors at "after_stagen". The
-//! reset values are then GEOMETRICALLY SCATTERED to every coincident cell copy in the
-//! pack: the owner's cells (interior or ghost), and for each on-rank neighbour -- at ANY
-//! refinement level, by the three-way rule below -- the cell(s) of its (interior+ghost)
-//! array covering the same physical position (periodic-wrapped) -- the containment
-//! pattern of ParticleMesh::FlushDepositBoundaries. Writing ALL copies keeps every block
-//! bit-consistent immediately, with no extra boundary exchange (this replaces the
-//! Athena++ ghost-particle mechanism and its NGHOST >= req+rctrl+1 requirement).
-//! The same-level and finer writes are assignments carrying identical values, so no
-//! atomics are needed; the coarser writes accumulate and are serialized (see below).
-//!
-//! CROSS-RANK control volumes: reset cells whose reach touches an off-rank neighbour are
-//! additionally staged into a device buffer and exchanged after the kernel
-//! (ExchangeCVReset): counts negotiated with MPI_Alltoall, then per-peer Isend/Irecv of
-//! (position, post-reset rho/M1..3, pre-reset rho/M1..3, owner level) records on a
-//! dedicated communicator. Each receiver applies the SAME geometric scatter locally --
-//! every local block whose interior+ghost array contains the (wrapped) position gets the
-//! value, interior and ghost copies alike, so multi-rank runs stay bit-consistent with
-//! single-rank ones. The sink cell itself is binned in the GLOBAL mesh frame (not the
-//! owner block's frame): block-frame binning resolves a position within round-off of a
-//! block edge differently in different blocks' frames (catastrophic cancellation), which
-//! breaks decomposition invariance.
-//!
-//! AMR (DIFFERENT-LEVEL) control volumes: the control volume always lives at the OWNER
-//! block's resolution, and every read stays inside the owner's array -- its ghost zones
-//! hold prolongated (coarser neighbour) or restricted (finer neighbour) data at
-//! "after_stagen", so the 27-cell integral is a faithful, conservative representation of
-//! the neighbour's gas either way. What must be level-aware is the SCATTER, because the
-//! cells that actually own the reset data may be coarser or finer than the control
-//! volume. For a reset cell with pre-reset value U_old and post-reset U_new, each target
-//! copy is updated by:
-//!   same level  : U <- U_new                       (assignment, as before)
-//!   finer target: U <- U_new for each of the 2^3 sub-cells covering the reset cell
-//!                 (uniform split; conservative for cell-averaged densities, and the
-//!                 sub-structure inside a control volume is deliberately erased anyway)
-//!   coarser tgt : U += (U_new - U_old)/2^3         (conservative PARTIAL restriction)
-//! The coarser rule is the only subtle one. A coarse cell holds 8 fine cells, of which
-//! the control volume may cover only some, so it cannot simply be assigned; but since
-//! AthenaK's prolongation is conservative, the 8 fine values average to the coarse value,
-//! and adding 1/8 of each covered cell's CHANGE removes exactly the mass that the owner's
-//! integral counted as accreted: dV_coarse*(dU/8) = dV_fine*dU. Partial coverage is
-//! therefore handled exactly, with no assumption that the control volume aligns with the
-//! coarse lattice. Duplicate coarse targets must be applied ONCE (unlike the idempotent
-//! assignments), so the coarser pass deduplicates by gid and runs serially -- which also
-//! keeps the matching w0 write consistent with the accumulated u0.
-//!
-//! A sink is skipped only defensively (level jump > 1, which proper nesting forbids, or a
-//! wild position); skips are counted and warned about, since a silently non-accreting
-//! sink shows up much later as a gas pile-up and a collapsing timestep.
-//!
-//! After scattering the reset conserved values, the matching PRIMITIVES are written to
-//! w0 for the same cells (isothermal: w_d = u_d, w_vi = M_i/rho). In AthenaK,
-//! Hydro/MHD::ConToPrim runs in "stagen" BEFORE this task ("after_stagen"), so without
-//! this the reset would be invisible to the next cycle's flux computation. (Athena++
-//! orders CONS2PRIM after the particle interaction for exactly this reason.)
-//!
-//! LIMITATIONS (documented scope): isothermal only (resets IDN+IM1..3; no energy/B).
-//! Across a level jump the extrapolation stencil reads prolongated/restricted ghost data,
-//! so the reset values there carry the coarser side's accuracy -- conservation is exact
-//! but the reset profile is only as good as the ghost data. Keeping a sink's control
-//! volume inside one level (the sink-proximity refinement halo in be_sink.cpp /
-//! bb_collapse.cpp) is therefore still preferable; this path exists so that the
-//! unavoidable transients -- a sink drifting toward a level jump, or the lag between a
-//! sink moving and the next regrid -- accrete conservatively instead of not at all.
+//! Scope: three-dimensional isothermal resets on a common finest grid, ordinary
+//! periodic boundaries and conserved-variable prolongation. Every reset cell must
+//! have a finest-level active owner; exterior donors may be prolonged ghost samples.
+//! Native EOS floors in the subsequent conversion remain separate gas mass sources.
 
 #include <algorithm>
 #include <cmath>
@@ -121,580 +57,175 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;
   if (particle_type != ParticleType::sink) return TaskStatus::complete;
   if (!(pmy_pack->pmesh->three_d)) return TaskStatus::complete;
-  // gas conserved and primitive variables
   if (pmy_pack->phydro == nullptr && pmy_pack->pmhd == nullptr) {
     return TaskStatus::complete;
   }
-  const bool is_mhd = (pmy_pack->pmhd != nullptr);
-  auto u0 = is_mhd ? pmy_pack->pmhd->u0 : pmy_pack->phydro->u0;
-  auto w0 = is_mhd ? pmy_pack->pmhd->w0 : pmy_pack->phydro->w0;
-
-  // cross-rank control-volume reset: when running on >1 rank, sinks whose CV reaches an
-  // off-rank neighbour stage those reset cells into cvemit_ for ExchangeCVReset()
-  // (below). Grow the staging buffer with the sink count and zero its counter each step.
-  const bool mpi_on = (global_variable::nranks > 1);
-  if (mpi_on) {
-    const int need = std::max(1, nprtcl_thispack)*64;
-    if (need > cvemit_max_) {
-      cvemit_max_ = need;
-      Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
-    }
-    Kokkos::deep_copy(cvemit_cnt_, 0);
-  }
-  auto cvemit = cvemit_;
-  auto cvcnt = cvemit_cnt_;
-  const int cvmax = cvemit_max_;
-  Kokkos::deep_copy(accskip_, 0);
-  auto accskip = accskip_;
-
-  auto &pr = prtcl_rdata;
-  auto &pi = prtcl_idata;
-  auto &mbsize = pmy_pack->pmb->mb_size;
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
-  const int is = indcs.is, ie = indcs.ie;
-  const int js = indcs.js, je = indcs.je;
-  const int ks = indcs.ks, ke = indcs.ke;
-  const int ng = indcs.ng;
-  const int ncells1 = indcs.nx1 + 2*indcs.ng;
-  const int ncells2 = indcs.nx2 + 2*indcs.ng;
-  const int ncells3 = indcs.nx3 + 2*indcs.ng;
+  const int nsinks = global_prtcl_tags.extent_int(0);
+  if (nsinks == 0) return TaskStatus::complete;
+  auto u0 = pmy_pack->pmhd != nullptr ? pmy_pack->pmhd->u0 : pmy_pack->phydro->u0;
+  auto gr = global_prtcl_rdata;
+  auto gt = global_prtcl_tags;
+  auto pr = prtcl_rdata;
+  auto pi = prtcl_idata;
+  auto mb_lev = pmy_pack->pmb->mb_lev.d_view;
+  auto *pm = pmy_pack->pmesh;
+  const auto indcs = pm->mb_indcs;
+  const auto msz = pm->mesh_size;
+  const int max_level = pm->max_level;
+  const int shift = max_level - pm->root_level;
+  const int nx1_eff = pm->mesh_indcs.nx1 << shift;
+  const int nx2_eff = pm->mesh_indcs.nx2 << shift;
+  const int nx3_eff = pm->mesh_indcs.nx3 << shift;
+  const Real dx1 = (msz.x1max-msz.x1min)/nx1_eff;
+  const Real dx2 = (msz.x2max-msz.x2min)/nx2_eff;
+  const Real dx3 = (msz.x3max-msz.x3min)/nx3_eff;
+  const Real dV = dx1*dx2*dx3;
+  const bool periodic = pm->strictly_periodic;
+  const int nmb = pmy_pack->nmb_thispack;
   const int gids = pmy_pack->gids;
-  const int npart = nprtcl_thispack;
+  const int nlocal = nprtcl_thispack;
   const int convergence = sink_convergence;
-  const int rctrl = 1;      // control volume = (2*rctrl+1)^3 = 27 cells (paper standard)
-  const int nmb_ = pmy_pack->nmb_thispack;
 
-  // neighbour tables for the geometric scatter (FlushDepositBoundaries pattern)
-  const int my_rank = global_variable::my_rank;
-  const int nnghbr = pmy_pack->pmb->nnghbr;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mbgid = pmy_pack->pmb->mb_gid;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &msz = pmy_pack->pmesh->mesh_size;
-  const Real Lx1 = msz.x1max - msz.x1min;
-  const Real Lx2 = msz.x2max - msz.x2min;
-  const Real Lx3 = msz.x3max - msz.x3min;
-
-  // team scratch: per control-volume cell, 4 post-reset conserved values (rows 0-3) and
-  // the 4 pre-reset ones (rows 4-7; needed for the conservative coarser-target update),
-  // plus a 4-vector accumulator for the per-sink accreted (dm, dM1, dM2, dM3)
-  const int scr_level = 0;
-  const size_t scr_bytes = ScrArray2D<Real>::shmem_size(8, 27)
-                         + ScrArray1D<Real>::shmem_size(4);
-
-  // ---- conflict colouring -----------------------------------------------------------
-  // The reference semantics are "strictly sequential across sinks", but that requirement
-  // only ever binds between sinks whose regions actually touch: a later sink's integral
-  // must see an earlier sink's reset. Sinks that cannot reach each other's cells commute,
-  // so they can run concurrently. Colour the sinks by that conflict relation and launch
-  // ONE TEAM PER SINK within each colour, instead of one team looping every sink -- which
-  // occupied a single SM regardless of how many sinks there were.
-  //
-  // Keep conservative conflict half-widths of 2.5 dx per sink, covering the control
-  // volume and extrapolation stencil. Use 3.5 dx near COARSER neighbours to cover
-  // writes rounded outward to coarse cells and prevent concurrent accumulation
-  // into the same coarse cell (the coarser-target += is not idempotent).
-  //
-  // Colours are assigned by LAYERING, not greedy: colour[j] = 1 + max(colour[i]) over
-  // conflicting i < j. That guarantees colour(j) > colour(i) for every conflicting pair
-  // with i < j, so processing colour by colour reproduces the old sequential order for
-  // exactly those pairs whose order mattered -- the change is bit-identical, not merely
-  // "equivalent for well-separated sinks". Within a colour the order is irrelevant by
-  // construction, so the result does not depend on the launch order either.
-  //
-  // Colouring is LOCAL to the rank, deliberately. Sinks on different ranks are already
-  // processed concurrently today (each rank runs its own kernel and the cross-rank reset
-  // is applied afterwards by ExchangeCVReset), so a local colouring preserves the
-  // existing semantics exactly and -- unlike a global one -- adds no collective to a step
-  // that already has too many.
-  //
-  // Cost is O(N^2) on the host over the (few) sinks; fine into the hundreds. Past ~10^4
-  // sinks this test itself would need a spatial hash.
-  const double _st_col = StBegin(ST_COLOUR);
-  std::vector<int> corder;      // sink indices grouped by colour
-  std::vector<int> coff(2, 0);  // [ncolours+1] offsets into corder
-  {
-    auto hr = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_rdata);
-    auto hi = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_idata);
-    auto msz_h = pmy_pack->pmb->mb_size.h_view;
-    auto lev_h = pmy_pack->pmb->mb_lev.h_view;
-    auto ngh_h = pmy_pack->pmb->nghbr.h_view;
-    const bool per = pmy_pack->pmesh->strictly_periodic;
-    const Real L[3] = {Lx1, Lx2, Lx3};
-    auto mimg = [&](Real d, int c) {
-      return per ? d - L[c]*std::floor(d/L[c] + 0.5) : d;
-    };
-    std::vector<Real> qx(npart), qy(npart), qz(npart);
-    std::vector<Real> hx(npart), hy(npart), hz(npart);
-    std::vector<int> colour(npart, 0);
-    for (int p = 0; p < npart; ++p) {
-      qx[p] = hr(IPX, p);  qy[p] = hr(IPY, p);  qz[p] = hr(IPZ, p);
-      const int m = hi(PGID, p) - gids;
-      // invalid PGID: the kernel skips it, so it conflicts with nothing
-      if (m < 0 || m >= nmb_) {
-        hx[p] = hy[p] = hz[p] = 0.0;
-        continue;
-      }
-      bool coarser = false;
-      for (int n = 0; n < nnghbr; ++n) {
-        if (ngh_h(m, n).gid < 0) continue;
-        if (ngh_h(m, n).lev < lev_h(m)) { coarser = true; break; }
-      }
-      const Real f = coarser ? 3.5 : 2.5;
-      hx[p] = f*msz_h(m).dx1;  hy[p] = f*msz_h(m).dx2;  hz[p] = f*msz_h(m).dx3;
-    }
-    int ncol = 1;
-    for (int j = 0; j < npart; ++j) {
-      for (int i = 0; i < j; ++i) {
-        if (std::fabs(mimg(qx[j]-qx[i], 0)) < hx[i] + hx[j] &&
-            std::fabs(mimg(qy[j]-qy[i], 1)) < hy[i] + hy[j] &&
-            std::fabs(mimg(qz[j]-qz[i], 2)) < hz[i] + hz[j]) {
-          colour[j] = std::max(colour[j], colour[i] + 1);
-        }
-      }
-      ncol = std::max(ncol, colour[j] + 1);
-    }
-    coff.assign(ncol + 1, 0);
-    for (int p = 0; p < npart; ++p) coff[colour[p] + 1]++;
-    for (int c = 0; c < ncol; ++c) coff[c+1] += coff[c];
-    corder.resize(std::max(1, npart));
-    std::vector<int> fill(coff.begin(), coff.end() - 1);
-    for (int p = 0; p < npart; ++p) corder[fill[colour[p]]++] = p;
-    // Report every step under the switch, not only when ncol > 1: a message that appears
-    // only on conflicting steps is easily misread as "this configuration always
-    // conflicts".
-    if (global_variable::my_rank == 0 && std::getenv("SINK_COLOUR_DBG") != nullptr) {
-      std::cout << "### [sink-colour] cycle=" << pmy_pack->pmesh->ncycle << "  " << npart
-                << " sink(s) in " << ncol << " colour(s)"
-                << (ncol > 1 ? "  (colours > 1 = interacting control volumes, serialized)"
-                             : "  (fully parallel)") << std::endl;
-    }
+  // Logical locations are host data. Copy exact finest-grid block offsets once;
+  // coarse blocks are excluded before these offsets are used in the kernel.
+  DualArray2D<int> mb_offset("accretion_mb_offset", nmb, 3);
+  for (int m=0; m<nmb; ++m) {
+    const auto &ll = pm->lloc_eachmb[gids+m];
+    mb_offset.h_view(m,0) = ll.lx1*indcs.nx1;
+    mb_offset.h_view(m,1) = ll.lx2*indcs.nx2;
+    mb_offset.h_view(m,2) = ll.lx3*indcs.nx3;
   }
-  DualArray1D<int> plist("acc_colour_order", std::max(1, npart));
-  for (int i = 0; i < npart; ++i) plist.h_view(i) = corder[i];
-  plist.template modify<HostMemSpace>();
-  plist.template sync<DevExeSpace>();
-  auto pl = plist.d_view;
-  StEnd(ST_COLOUR, _st_col);
+  mb_offset.template modify<HostMemSpace>();
+  mb_offset.template sync<DevExeSpace>();
+  auto off = mb_offset.d_view;
 
-  // sanity diagnostic (sanity_vmax > 0): record the update that produced a bad velocity
-  const Real svmax2 = (sanity_vmax > 0.0) ? sanity_vmax*sanity_vmax : -1.0;
+  const int scr_level = 0;
+  const size_t scr_bytes = ScrArray2D<Real>::shmem_size(4, 27)
+                         + ScrArray1D<Real>::shmem_size(5);
+  const Real svmax2 = sanity_vmax > 0.0 ? sanity_vmax*sanity_vmax : -1.0;
   auto sflag = sanity_flag_;
   auto srec = sanity_rec_;
 
-  for (int c = 0; c + 1 < static_cast<int>(coff.size()); ++c) {
-    const int c0 = coff[c];
-    const int nteam = coff[c+1] - c0;
-    if (nteam <= 0) continue;
-    Kokkos::TeamPolicy<> policy(DevExeSpace(), nteam, Kokkos::AUTO);
-    policy.set_scratch_size(scr_level, Kokkos::PerTeam(scr_bytes));
-
-    Kokkos::parallel_for("sink_accrete", policy,
-    KOKKOS_LAMBDA(TeamMember_t tm) {
-    ScrArray2D<Real> scr(tm.team_scratch(scr_level), 8, 27);
-    ScrArray1D<Real> acc(tm.team_scratch(scr_level), 4);
-
-    // one team per sink; sinks sharing a colour provably cannot touch each other's cells
-    {
-      const int p = pl(c0 + tm.league_rank());
-      const int m = pi(PGID, p) - gids;
-      // Guard invalid PGID before ANY indexed access (mirrors ParticleMesh::DepositMass):
-      // a corrupt/ejected particle must skip accretion, not fault. Every thread of the
-      // team evaluates this identically, so the whole team returns together and the
-      // barriers below stay collective.
-      if (m < 0 || m >= nmb_) return;
-      bool touches_offrank = false;   // CV reaches an off-rank neighbour (any level)
-      const Real dx1 = mbsize.d_view(m).dx1;
-      const Real dx2 = mbsize.d_view(m).dx2;
-      const Real dx3 = mbsize.d_view(m).dx3;
-      const Real dV = dx1*dx2*dx3;
-
-      // Cell containing the sink -- guard the
-      // double->int conversions against non-finite/wild positions (UB otherwise),
-      // and use floor (truncation is wrong for fractional offsets in (-1,0)).
-      // BIN IN THE GLOBAL MESH FRAME, then convert to the owner-local index: block-frame
-      // binning is frame-DEPENDENT for a position within round-off of a block boundary
-      // (catastrophic cancellation resolves the same physical point to different cells
-      // in different blocks' frames), which breaks decomposition invariance when ranks
-      // hold different owner blocks. One global origin -> one answer on every rank.
-      const Real xi1 = (pr(IPX, p) - msz.x1min)/dx1;
-      const Real xi2 = (pr(IPY, p) - msz.x2min)/dx2;
-      const Real xi3 = (pr(IPZ, p) - msz.x3min)/dx3;
-      if (!(xi1 > -1.0e9 && xi1 < 1.0e9) || !(xi2 > -1.0e9 && xi2 < 1.0e9) ||
-          !(xi3 > -1.0e9 && xi3 < 1.0e9)) {
-        return;
+  par_for_outer("sink_accrete", DevExeSpace(), scr_bytes, scr_level,
+                0, nmb-1, 0, nsinks-1,
+  KOKKOS_LAMBDA(TeamMember_t member, const int m, const int p) {
+    if (mb_lev(m) != max_level) return;
+    const int nx[3] = {nx1_eff, nx2_eff, nx3_eff};
+    const int nb[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
+    const Real lo[3] = {msz.x1min, msz.x2min, msz.x3min};
+    const Real hi[3] = {msz.x1max, msz.x2max, msz.x3max};
+    const Real xp[3] = {gr(IPX,p), gr(IPY,p), gr(IPZ,p)};
+    int center[3];
+    for (int axis=0; axis<3; ++axis) {
+      Real x = xp[axis];
+      if (periodic) {
+        const Real length = hi[axis]-lo[axis];
+        x -= length*Kokkos::floor((x-lo[axis])/length);
       }
-      // owner block's integer cell offset from the mesh origin (exact by construction:
-      // block edges lie on the global cell lattice)
-      const int off1 = static_cast<int>((mbsize.d_view(m).x1min - msz.x1min)/dx1 + 0.5);
-      const int off2 = static_cast<int>((mbsize.d_view(m).x2min - msz.x2min)/dx2 + 0.5);
-      const int off3 = static_cast<int>((mbsize.d_view(m).x3min - msz.x3min)/dx3 + 0.5);
-      const int ip  = static_cast<int>(Kokkos::floor(xi1)) - off1 + is;
-      const int jp  = static_cast<int>(Kokkos::floor(xi2)) - off2 + js;
-      const int kp  = static_cast<int>(Kokkos::floor(xi3)) - off3 + ks;
-
-      // ---- eligibility gate --------------------------------------------------------
-      // Level jumps of more than one violate proper nesting and are not handled.
-      // Stage resets when they can reach an off-rank neighbour's interior or ghosts.
-      // (Computed redundantly by every team thread; all take identical branches.)
-      const int mylev = mblev.d_view(m);
-      const Real xs = pr(IPX, p), ys = pr(IPY, p), zs = pr(IPZ, p);
-      bool eligible = true;
-      for (int n = 0; n < nnghbr; ++n) {
-        if (nghbr.d_view(m,n).gid < 0) continue;
-        const int dlev = nghbr.d_view(m,n).lev - mylev;
-        if (dlev > 1 || dlev < -1) {   // proper nesting violated: refuse to guess
-          eligible = false; break;
-        }
-        if (nghbr.d_view(m,n).rank != my_rank) {
-          // Coarse ghosts are twice as wide; owner spacing also bounds finer ghosts.
-          const int reach = rctrl + ng*(dlev < 0 ? 2 : 1);
-          const Real h1 = reach*dx1, h2 = reach*dx2, h3 = reach*dx3;
-          if ((xs - mbsize.d_view(m).x1min <= h1) ||
-              (mbsize.d_view(m).x1max - xs <= h1) ||
-              (ys - mbsize.d_view(m).x2min <= h2) ||
-              (mbsize.d_view(m).x2max - ys <= h2) ||
-              (zs - mbsize.d_view(m).x3min <= h3) ||
-              (mbsize.d_view(m).x3max - zs <= h3)) touches_offrank = true;
-        }
+      center[axis] = CellCenterIndex(x,nx[axis],lo[axis],hi[axis]);
+      if (periodic) {
+        if (center[axis] < off(m,axis)-1) center[axis] += nx[axis];
+        if (center[axis] > off(m,axis)+nb[axis]) center[axis] -= nx[axis];
       }
-      if (!eligible) {
-        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          Kokkos::atomic_fetch_add(&accskip(0), 1);
-        });
-        return;
+      if (center[axis] < off(m,axis)-1 ||
+          center[axis] > off(m,axis)+nb[axis]) return;
+    }
+    const int ic = center[0]-off(m,0)+indcs.is;
+    const int jc = center[1]-off(m,1)+indcs.js;
+    const int kc = center[2]-off(m,2)+indcs.ks;
+    if (!SinkConverging(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p),
+                        gr(IPVZ,p), convergence)) {
+      if (gr(IPM,p) == 0.0) {
+        Kokkos::abort("Massless sink failed convergence in AccreteMass.");
       }
+      return;
+    }
 
-      // zero the per-sink accumulator
-      Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-        for (int v = 0; v < 4; ++v) acc(v) = 0.0;
-      });
-      tm.team_barrier();
+    ScrArray2D<Real> scr(member.team_scratch(scr_level), 4, 27);
+    ScrArray1D<Real> acc(member.team_scratch(scr_level), 5);
+    par_for_inner(member, 0, 26, [&](const int c) {
+      const int di = c%3-1, dj = (c/3)%3-1, dk = c/9-1;
+      const int nnz = (di != 0)+(dj != 0)+(dk != 0);
+      if (nnz == 0) return;
+      for (int v=0; v<4; ++v) {
+        Real val = 0.0;
+        if (di != 0) val += u0(m,v,kc+dk,jc+dj,ic+2*di);
+        if (dj != 0) val += u0(m,v,kc+dk,jc+2*dj,ic+di);
+        if (dk != 0) val += u0(m,v,kc+2*dk,jc+dj,ic+di);
+        scr(v,c) = val/nnz;
+      }
+    });
+    member.team_barrier();
 
-      // ---- process one control volume centred on (ic,jc,kc) ----------------------
-      // (executed collectively by the whole team; all threads take identical branches)
-      auto process_cv = [&](const int ic, const int jc, const int kc) {
-        // hard array-bounds guard for the read stencil (reaches rctrl+1 from the CV
-        // centre); with nghost >= rctrl+2 this passes for any validly binned sink.
-        // Counted like the eligibility skips: bailing out here also means this sink
-        // stops accreting, which must not happen silently.
-        if (ic < rctrl+1 || ic > ncells1-rctrl-2 ||
-            jc < rctrl+1 || jc > ncells2-rctrl-2 ||
-            kc < rctrl+1 || kc > ncells3-rctrl-2) {
-          Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-            Kokkos::atomic_fetch_add(&accskip(0), 1);
-          });
-          return;
+    Kokkos::single(Kokkos::PerTeam(member), [&]() {
+      Real old_mass = 0.0, reset_mass = 0.0;
+      for (int v=0; v<4; ++v) {
+        scr(v,13) = (scr(v,12)+scr(v,14)+scr(v,10)+scr(v,16)
+                    +scr(v,4)+scr(v,22))/6.0;
+        Real s1 = 0.0, s2 = 0.0;
+        // Fixed cell order makes replicated decisions independent of team size.
+        for (int c=0; c<27; ++c) {
+          const int di = c%3-1, dj = (c/3)%3-1, dk = c/9-1;
+          s1 += u0(m,v,kc+dk,jc+dj,ic+di);
+          s2 += scr(v,c);
         }
+        acc(v) = (s1-s2)*dV;
+        if (v == 0) {old_mass = s1; reset_mass = s2;}
+      }
+      if (gr(IPM,p) == 0.0 && !(acc(0) > 0.0)) {
+        Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
+      }
+      acc(4) = reset_mass > old_mass ? 0.0 : 1.0;
+      if (acc(4) == 0.0) return;
 
-        if (!SinkConverging(u0, m, ic, jc, kc, pr(IPVX,p), pr(IPVY,p),
-                            pr(IPVZ,p), convergence)) {
-          if (pr(IPM,p) == 0.0) {
-            Kokkos::abort("Massless sink failed convergence in AccreteMass.");
-          }
-          return;
-        }
-
-        // Step (a): integrate conserved vars over the 27 cells (pre-reset), and
-        // Step (b): compute the 26 shell reset values into scratch from pre-reset u0.
-        // Unified extrapolation rule for a shell cell at offset (di,dj,dk), nnz = number
-        // of non-zero offsets: value = (1/nnz) * sum over each non-zero axis of u0 at
-        // the position with THAT axis offset doubled. This reproduces the reference:
-        // faces (nnz=1) copy from one-further-out; edges (nnz=2) avg-of-2; corners
-        // (nnz=3) avg-of-3. All reads are outside the control volume.
-        Real s1[4];
-        for (int v = 0; v < 4; ++v) {
-          Real sum = 0.0;
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, 27),
-          [&](const int c, Real &psum) {
-            const int di = c%3 - 1, dj = (c/3)%3 - 1, dk = c/9 - 1;
-            const Real uold = u0(m, v, kc+dk, jc+dj, ic+di);
-            psum += uold;
-            scr(4+v, c) = uold;   // pre-reset value, for the coarser-target update
-            const int nnz = (di != 0) + (dj != 0) + (dk != 0);
-            if (nnz > 0) {
-              Real val = 0.0;
-              if (di != 0) val += u0(m, v, kc+dk,   jc+dj,   ic+2*di);
-              if (dj != 0) val += u0(m, v, kc+dk,   jc+2*dj, ic+di);
-              if (dk != 0) val += u0(m, v, kc+2*dk, jc+dj,   ic+di);
-              scr(v, c) = val/nnz;
-            }
-          }, Kokkos::Sum<Real>(sum));
-          s1[v] = sum;
-        }
-        tm.team_barrier();
-
-        // centre cell: average of the 6 (scratch) face values; then Step (c)+(d):
-        // M_ctrl = sum of scratch, accreted difference accumulated into acc
-        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          for (int v = 0; v < 4; ++v) {
-            scr(v, 13) = (scr(v, 12) + scr(v, 14) +    // (di=-1/+1, dj=dk=0)
-                          scr(v, 10) + scr(v, 16) +    // (dj=-1/+1)
-                          scr(v, 4)  + scr(v, 22))/6.0; // (dk=-1/+1)
-          }
-        });
-        tm.team_barrier();
-
-        // Decide before any local, coarse/fine or remote writes. All team threads
-        // read identical scratch values and take the same branch.
-        Real reset_mass = 0.0;
-        for (int c = 0; c < 27; ++c) reset_mass += scr(0,c);
-        if (pr(IPM,p) == 0.0 && !((s1[0]-reset_mass)*dV > 0.0)) {
-          Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
-        }
-        if (reset_mass > s1[0]) return;
-        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          for (int v=0; v<4; ++v) {
-            Real s2=0.0;
-            for (int c=0; c<27; ++c) s2 += scr(v,c);
-            acc(v) += (s1[v]-s2)*dV;
-          }
-        });
-        tm.team_barrier();
-
-        // Scatter the reset values to EVERY coincident cell copy in the pack: the
-        // owner's cell (interior or ghost), plus, for each on-rank neighbour at THIS
-        // level or FINER, the cell(s) of its interior+ghost array covering the same
-        // physical position (periodic-wrapped). Coarser neighbours accumulate a
-        // difference instead and are handled by the serial pass below. Also write
-        // matching primitives to w0 (isothermal: w_d = u_d, w_vi = M_i/rho); without the
-        // w0 update the reset is invisible to the next cycle's fluxes (ConToPrim already
-        // ran this stage). These writes are assignments carrying identical values, so
-        // duplicates are harmless and no atomics are needed.
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, 27), [&](const int c) {
-          const int di = c%3 - 1, dj = (c/3)%3 - 1, dk = c/9 - 1;
-          const int i = ic + di, j = jc + dj, k = kc + dk;
-          // owner copy
-          for (int v = 0; v < 4; ++v) u0(m, v, k, j, i) = scr(v, c);
-          const Real wd = scr(0, c);
-          if (wd > 0.0) {
-            w0(m, IDN, k, j, i) = wd;
-            w0(m, IVX, k, j, i) = scr(1, c)/wd;
-            w0(m, IVY, k, j, i) = scr(2, c)/wd;
-            w0(m, IVZ, k, j, i) = scr(3, c)/wd;
-          }
-          // physical centre of this cell in the owner's frame (linear extension is
-          // valid in the ghost region too)
-          const Real xw = mbsize.d_view(m).x1min + (static_cast<Real>(i-is) + 0.5)*dx1;
-          const Real yw = mbsize.d_view(m).x2min + (static_cast<Real>(j-js) + 0.5)*dx2;
-          const Real zw = mbsize.d_view(m).x3min + (static_cast<Real>(k-ks) + 0.5)*dx3;
-          // every coincident copy in on-rank neighbours at THIS level or finer.
-          // Coarser neighbours accumulate a difference instead and must be applied once
-          // per block, so they are handled serially below (a coarse block appears in
-          // several neighbour slots, and += is not idempotent).
-          for (int n = 0; n < nnghbr; ++n) {
-            if (nghbr.d_view(m,n).gid < 0) continue;
-            // shipped by ExchangeCVReset
-            if (nghbr.d_view(m,n).rank != my_rank) continue;
-            const int dlev = nghbr.d_view(m,n).lev - mylev;
-            if (dlev < 0) continue;                            // coarser: serial pass
-            const int dnb = nghbr.d_view(m,n).gid - mbgid.d_view(0);
-            if (dnb < 0 || dnb >= nmb_) continue;              // safety
-            const Real x1d = mbsize.d_view(dnb).x1min, x1u = mbsize.d_view(dnb).x1max;
-            const Real x2d = mbsize.d_view(dnb).x2min, x2u = mbsize.d_view(dnb).x2max;
-            const Real x3d = mbsize.d_view(dnb).x3min, x3u = mbsize.d_view(dnb).x3max;
-            // wrap into the neighbour's frame (periodic domains)
-            Real xc = xw, yc = yw, zc = zw, ctr;
-            ctr = 0.5*(x1d + x1u);
-            if (xc - ctr >  0.5*Lx1) xc -= Lx1;
-            if (xc - ctr < -0.5*Lx1) xc += Lx1;
-            ctr = 0.5*(x2d + x2u);
-            if (yc - ctr >  0.5*Lx2) yc -= Lx2;
-            if (yc - ctr < -0.5*Lx2) yc += Lx2;
-            ctr = 0.5*(x3d + x3u);
-            if (zc - ctr >  0.5*Lx3) zc -= Lx3;
-            if (zc - ctr < -0.5*Lx3) zc += Lx3;
-            if (dlev == 0) {
-              // index in the neighbour's interior+ghost array (same level -> same dx;
-              // use the OWNER's dx so this path is bit-for-bit the pre-AMR behaviour)
-              const int in_ = static_cast<int>(Kokkos::floor((xc - x1d)/dx1)) + is;
-              const int jn_ = static_cast<int>(Kokkos::floor((yc - x2d)/dx2)) + js;
-              const int kn_ = static_cast<int>(Kokkos::floor((zc - x3d)/dx3)) + ks;
-              if (in_ < 0 || in_ >= ncells1 || jn_ < 0 || jn_ >= ncells2 ||
-                  kn_ < 0 || kn_ >= ncells3) continue;
-              // skip the trivial self-write (same block, unwrapped)
-              if (dnb == m && in_ == i && jn_ == j && kn_ == k) continue;
-              for (int v = 0; v < 4; ++v) u0(dnb, v, kn_, jn_, in_) = scr(v, c);
-              if (wd > 0.0) {
-                w0(dnb, IDN, kn_, jn_, in_) = wd;
-                w0(dnb, IVX, kn_, jn_, in_) = scr(1, c)/wd;
-                w0(dnb, IVY, kn_, jn_, in_) = scr(2, c)/wd;
-                w0(dnb, IVZ, kn_, jn_, in_) = scr(3, c)/wd;
-              }
-            } else {
-              // FINER neighbour: uniform split of this reset cell over the sub-cells it
-              // covers. Sample the reset cell at the sub-cell centres (dlev == 1 => 2 per
-              // axis) so each sub-cell is found by the same containment rule, and no two
-              // reset cells can target the same sub-cell (their boxes are disjoint).
-              const Real dn1 = mbsize.d_view(dnb).dx1;
-              const Real dn2 = mbsize.d_view(dnb).dx2;
-              const Real dn3 = mbsize.d_view(dnb).dx3;
-              const int r = 1 << dlev;
-              const Real rinv = 1.0/static_cast<Real>(r);
-              for (int sk = 0; sk < r; ++sk) {
-              for (int sj = 0; sj < r; ++sj) {
-              for (int si = 0; si < r; ++si) {
-                const Real xsub = xc + ((si + 0.5)*rinv - 0.5)*dx1;
-                const Real ysub = yc + ((sj + 0.5)*rinv - 0.5)*dx2;
-                const Real zsub = zc + ((sk + 0.5)*rinv - 0.5)*dx3;
-                const int in_ = static_cast<int>(Kokkos::floor((xsub - x1d)/dn1)) + is;
-                const int jn_ = static_cast<int>(Kokkos::floor((ysub - x2d)/dn2)) + js;
-                const int kn_ = static_cast<int>(Kokkos::floor((zsub - x3d)/dn3)) + ks;
-                if (in_ < 0 || in_ >= ncells1 || jn_ < 0 || jn_ >= ncells2 ||
-                    kn_ < 0 || kn_ >= ncells3) continue;
-                for (int v = 0; v < 4; ++v) u0(dnb, v, kn_, jn_, in_) = scr(v, c);
-                if (wd > 0.0) {
-                  w0(dnb, IDN, kn_, jn_, in_) = wd;
-                  w0(dnb, IVX, kn_, jn_, in_) = scr(1, c)/wd;
-                  w0(dnb, IVY, kn_, jn_, in_) = scr(2, c)/wd;
-                  w0(dnb, IVZ, kn_, jn_, in_) = scr(3, c)/wd;
-                }
-              }
-              }
-              }
-            }
-          }
-          // stage this reset cell for the cross-rank exchange (owner + physical centre +
-          // post-reset and pre-reset conserved values); ExchangeCVReset() routes it to
-          // any off-rank block whose expanded bounds contain the position, at any level.
-          // Only for sinks flagged near a rank boundary.
-          if (touches_offrank) {
-            const int e = Kokkos::atomic_fetch_add(&cvcnt(0), 1);
-            if (e < cvmax) {
-              cvemit(e, 0) = static_cast<Real>(m);
-              cvemit(e, 1) = xw; cvemit(e, 2) = yw; cvemit(e, 3) = zw;
-              cvemit(e, 4) = scr(0, c); cvemit(e, 5) = scr(1, c);
-              cvemit(e, 6) = scr(2, c); cvemit(e, 7) = scr(3, c);
-              cvemit(e, 8) = scr(4, c); cvemit(e, 9) = scr(5, c);
-              cvemit(e,10) = scr(6, c); cvemit(e,11) = scr(7, c);
-            }
-          }
-        });
-        tm.team_barrier();
-
-        // COARSER on-rank neighbours: conservative partial restriction of the reset,
-        // coarse += (post - pre)/2^3 per covered fine cell. Serial in one thread because
-        // (a) a coarse block occupies several neighbour slots and the accumulation must
-        // happen exactly once per block, (b) several of the 27 cells land in the same
-        // coarse cell, and (c) w0 must be derived from the FINAL accumulated u0.
-        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          for (int n = 0; n < nnghbr; ++n) {
-            if (nghbr.d_view(m,n).gid < 0) continue;
-            if (nghbr.d_view(m,n).rank != my_rank) continue;
-            const int dlev = nghbr.d_view(m,n).lev - mylev;
-            if (dlev >= 0) continue;                       // handled team-parallel above
-            const int dgid = nghbr.d_view(m,n).gid;
-            bool seen = false;                             // apply once per coarse block
-            for (int q = 0; q < n; ++q) {
-              if (nghbr.d_view(m,q).gid == dgid) { seen = true; break; }
-            }
-            if (seen) continue;
-            const int dnb = dgid - mbgid.d_view(0);
-            if (dnb < 0 || dnb >= nmb_) continue;
-            const Real x1d = mbsize.d_view(dnb).x1min, x1u = mbsize.d_view(dnb).x1max;
-            const Real x2d = mbsize.d_view(dnb).x2min, x2u = mbsize.d_view(dnb).x2max;
-            const Real x3d = mbsize.d_view(dnb).x3min, x3u = mbsize.d_view(dnb).x3max;
-            const Real dn1 = mbsize.d_view(dnb).dx1;
-            const Real dn2 = mbsize.d_view(dnb).dx2;
-            const Real dn3 = mbsize.d_view(dnb).dx3;
-            // one coarse cell holds 2^(3*|dlev|) cells of the control volume
-            const int r = 1 << (-dlev);
-            const Real fac = 1.0/static_cast<Real>(r*r*r);
-            for (int c = 0; c < 27; ++c) {
-              const int di = c%3 - 1, dj = (c/3)%3 - 1, dk = c/9 - 1;
-              const Real xw2 = mbsize.d_view(m).x1min
-                             + (static_cast<Real>(ic+di-is) + 0.5)*dx1;
-              const Real yw2 = mbsize.d_view(m).x2min
-                             + (static_cast<Real>(jc+dj-js) + 0.5)*dx2;
-              const Real zw2 = mbsize.d_view(m).x3min
-                             + (static_cast<Real>(kc+dk-ks) + 0.5)*dx3;
-              Real xc = xw2, yc = yw2, zc = zw2, ctr;
-              ctr = 0.5*(x1d + x1u);
-              if (xc - ctr >  0.5*Lx1) xc -= Lx1;
-              if (xc - ctr < -0.5*Lx1) xc += Lx1;
-              ctr = 0.5*(x2d + x2u);
-              if (yc - ctr >  0.5*Lx2) yc -= Lx2;
-              if (yc - ctr < -0.5*Lx2) yc += Lx2;
-              ctr = 0.5*(x3d + x3u);
-              if (zc - ctr >  0.5*Lx3) zc -= Lx3;
-              if (zc - ctr < -0.5*Lx3) zc += Lx3;
-              const int in_ = static_cast<int>(Kokkos::floor((xc - x1d)/dn1)) + is;
-              const int jn_ = static_cast<int>(Kokkos::floor((yc - x2d)/dn2)) + js;
-              const int kn_ = static_cast<int>(Kokkos::floor((zc - x3d)/dn3)) + ks;
-              if (in_ < 0 || in_ >= ncells1 || jn_ < 0 || jn_ >= ncells2 ||
-                  kn_ < 0 || kn_ >= ncells3) continue;
-              for (int v = 0; v < 4; ++v) {
-                u0(dnb, v, kn_, jn_, in_) += fac*(scr(v, c) - scr(4+v, c));
-              }
-              const Real wdc = u0(dnb, IDN, kn_, jn_, in_);
-              if (wdc > 0.0) {
-                w0(dnb, IDN, kn_, jn_, in_) = wdc;
-                w0(dnb, IVX, kn_, jn_, in_) = u0(dnb, IM1, kn_, jn_, in_)/wdc;
-                w0(dnb, IVY, kn_, jn_, in_) = u0(dnb, IM2, kn_, jn_, in_)/wdc;
-                w0(dnb, IVZ, kn_, jn_, in_) = u0(dnb, IM3, kn_, jn_, in_)/wdc;
-              }
-            }
-          }
-        });
-        tm.team_barrier();
-      };
-      // -----------------------------------------------------------------------------
-
-      // Reset the current control volume.
-      process_cv(ip, jp, kp);
-
-      // Conservative update of the sink mass and velocity.
-      Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-        const Real mp = pr(IPM, p);
-        const Real mnew = mp + acc(0);
-        if (mnew > 0.0) {   // guard pathological dm < -mp (extrapolation outflow)
+      // Migration may reorder the local arrays. Only the matching owner team
+      // credits the complete CV difference; other teams only reset their gas.
+      for (int q=0; q<nlocal; ++q) {
+        if (pi(PTAG,q) != gt(p) || pi(PGID,q) != gids+m) continue;
+        const Real mp = gr(IPM,p), mnew = mp+acc(0);
+        if (mnew > 0.0) {
           const Real minv = 1.0/mnew;
-          const Real vx0 = pr(IPVX, p), vy0 = pr(IPVY, p), vz0 = pr(IPVZ, p);
-          pr(IPVX, p) = (mp*pr(IPVX, p) + acc(1))*minv;
-          pr(IPVY, p) = (mp*pr(IPVY, p) + acc(2))*minv;
-          pr(IPVZ, p) = (mp*pr(IPVZ, p) + acc(3))*minv;
-          pr(IPM, p)  = mnew;
+          const Real vx0 = gr(IPVX,p), vy0 = gr(IPVY,p), vz0 = gr(IPVZ,p);
+          pr(IPVX,q) = (mp*vx0+acc(1))*minv;
+          pr(IPVY,q) = (mp*vy0+acc(2))*minv;
+          pr(IPVZ,q) = (mp*vz0+acc(3))*minv;
+          pr(IPM,q) = mnew;
           if (svmax2 > 0.0) {
-            const Real v2 = pr(IPVX, p)*pr(IPVX, p) + pr(IPVY, p)*pr(IPVY, p)
-                          + pr(IPVZ, p)*pr(IPVZ, p);
+            const Real v2 = pr(IPVX,q)*pr(IPVX,q)+pr(IPVY,q)*pr(IPVY,q)
+                          +pr(IPVZ,q)*pr(IPVZ,q);
             if (!(v2 <= svmax2) &&
                 Kokkos::atomic_compare_exchange(&sflag(0), 0, 2) == 0) {
-              srec(0) = static_cast<Real>(pi(PTAG, p));
-              srec(1) = mp;  srec(2) = acc(0);
-              srec(3) = acc(1);  srec(4) = acc(2);  srec(5) = acc(3);
-              srec(6) = vx0;  srec(7) = vy0;  srec(8) = vz0;
-              srec(9) = pr(IPVX, p);  srec(10) = pr(IPVY, p);  srec(11) = pr(IPVZ, p);
-              srec(12) = pr(IPX, p);  srec(13) = pr(IPY, p);  srec(14) = pr(IPZ, p);
+              srec(0) = static_cast<Real>(pi(PTAG,q));
+              srec(1) = mp; srec(2) = acc(0);
+              srec(3) = acc(1); srec(4) = acc(2); srec(5) = acc(3);
+              srec(6) = vx0; srec(7) = vy0; srec(8) = vz0;
+              srec(9) = pr(IPVX,q); srec(10) = pr(IPVY,q); srec(11) = pr(IPVZ,q);
+              srec(12) = pr(IPX,q); srec(13) = pr(IPY,q); srec(14) = pr(IPZ,q);
             }
           }
         }
-      });
-      tm.team_barrier();
-    }
+        break;
+      }
     });
-  }
+    member.team_barrier();
+    if (acc(4) == 0.0) return;
 
-  // apply reset cells that landed in off-rank neighbour interiors (multi-rank only)
-  if (mpi_on) {
-    SinkTimerScope _st(this, ST_CVRESET);
-    ExchangeCVReset();
-  }
-
-  // report defensively skipped sinks. A skipped sink keeps attracting gas but never
-  // removes it, so this must never pass unnoticed; rate-limited to a few messages.
-  if (accskip_warned_ < 5) {
-    auto nskip_h = Kokkos::create_mirror_view(accskip_);
-    Kokkos::deep_copy(nskip_h, accskip_);
-    if (nskip_h(0) > 0) {
-      accskip_warned_++;
-      std::cout << "### WARNING in Particles::AccreteMass: " << nskip_h(0)
-                << " sink control volume(s) skipped this step (a level jump greater than "
-                << "one in reach, a wild position, or a control volume reaching outside "
-                << "the owner's array); those sinks are NOT accreting."
-                << (accskip_warned_ == 5 ? " Further warnings suppressed." : "")
-                << std::endl;
-    }
-  }
+    par_for_inner(member, 0, 26, [&](const int c) {
+      const int delta[3] = {c%3-1, (c/3)%3-1, c/9-1};
+      int local[3];
+      for (int axis=0; axis<3; ++axis) {
+        int cell = center[axis]+delta[axis];
+        if (periodic) cell = (cell+nx[axis])%nx[axis];
+        local[axis] = cell-off(m,axis);
+        if (local[axis] < 0 || local[axis] >= nb[axis]) return;
+      }
+      // Read images can be ghosts even when the wrapped write belongs to the
+      // opposite active edge of a block spanning an entire periodic direction.
+      for (int v=0; v<4; ++v) {
+        u0(m,v,local[2]+indcs.ks,local[1]+indcs.js,local[0]+indcs.is) = scr(v,c);
+      }
+    });
+  });
 
   CheckSinkSanity("accrete", stage);
   return TaskStatus::complete;

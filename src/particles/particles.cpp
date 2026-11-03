@@ -89,6 +89,12 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     }
   }
 
+  if (particle_type == ParticleType::sink && accretion && indcs.ng < 3) {
+    std::cout << "### FATAL ERROR: sink accretion requires at least three ghost layers"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
   // select pusher algorithm
   {
     std::string ppush = pin->GetString("particles","pusher");
