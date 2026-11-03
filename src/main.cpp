@@ -404,6 +404,7 @@ int main(int argc, char *argv[]) {
 
   if (wdog_flag) WatchDog(wdog_timeout);
   pdriver->Initialize(pmesh, pinput, pout, res_flag);
+  if (global_variable::my_rank == 0) pinput->ParameterDump(std::cout);
   pdriver->Execute(pmesh, pinput, pout, wdog_flag);
   pdriver->Finalize(pmesh, pinput, pout);
 
