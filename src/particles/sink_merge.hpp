@@ -11,12 +11,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdint>
 #include <vector>
+
+#include "coordinates/cell_locations.hpp"
 namespace particles {
 // Host-only, deterministic global pair reduction. Candidate weights never become mass.
 template<class T> struct SinkMergeRecord {
-  std::array<T,3> x, v, dx;
+  std::array<T,3> x, v;
   T mass, weight;
   int tag;
   bool alive = true, changed = false;
@@ -26,12 +27,18 @@ template<class T> T SinkMinimumImage(T d, T length, bool periodic) {
 }
 template<class T> bool SinkContact(const SinkMergeRecord<T> &a,
     const SinkMergeRecord<T> &b, const std::array<T,3> &origin,
-    const std::array<int,3> &nx_eff, bool periodic) {
+    const std::array<T,3> &upper, const std::array<int,3> &nx_eff, bool periodic) {
   // All sinks use the same finest-level cell spacing.
   int touches=0;
   for (int c=0; c<3; ++c) {
-    const int i=std::floor((a.x[c]-origin[c])/a.dx[c]);
-    const int j=std::floor((b.x[c]-origin[c])/b.dx[c]);
+    const T length=upper[c]-origin[c];
+    T x=a.x[c], y=b.x[c];
+    if (periodic) {
+      x-=length*std::floor((x-origin[c])/length);
+      y-=length*std::floor((y-origin[c])/length);
+    }
+    const int i=CellCenterIndex(x,nx_eff[c],origin[c],upper[c]);
+    const int j=CellCenterIndex(y,nx_eff[c],origin[c],upper[c]);
     int distance=std::abs(i-j);
     if (periodic) {
       distance=std::min(distance,nx_eff[c]-distance);
@@ -43,10 +50,12 @@ template<class T> bool SinkContact(const SinkMergeRecord<T> &a,
   }
   return true;
 }
-template<class T, class Locate> void ResolveSinkMergers(
+template<class T> void ResolveSinkMergers(
     std::vector<SinkMergeRecord<T>> &s, const std::array<T,3> &origin,
-    const std::array<T,3> &length, const std::array<int,3> &nx_eff,
-    bool periodic, Locate locate) {
+    const std::array<T,3> &upper, const std::array<int,3> &nx_eff,
+    bool periodic) {
+  const std::array<T,3> length={upper[0]-origin[0],upper[1]-origin[1],
+                                upper[2]-origin[2]};
   std::sort(s.begin(),s.end(),[](const auto &a,const auto &b){return a.tag<b.tag;});
   for (;;) {
     bool merged=false;
@@ -54,7 +63,7 @@ template<class T, class Locate> void ResolveSinkMergers(
       if (!s[i].alive) continue;
       for (size_t j=i+1; j<s.size(); ++j) {
         if (!s[j].alive ||
-            !SinkContact(s[i],s[j],origin,nx_eff,periodic)) continue;
+            !SinkContact(s[i],s[j],origin,upper,nx_eff,periodic)) continue;
         auto &a=s[i]; auto &b=s[j];
         const bool anew=a.mass==T(0), bnew=b.mass==T(0);
         if (anew != bnew) {
@@ -72,7 +81,6 @@ template<class T, class Locate> void ResolveSinkMergers(
             u.v[c]=anew?T(0):(wu*u.v[c]+wv*v.v[c])/total;
           }
           u.mass+=v.mass; u.weight+=v.weight; u.changed=true; v.alive=false;
-          locate(u); // Recompute containing level/cell after EVERY merger.
         }
         merged=true;
         break; // Restart global scan: the new COM may contact an earlier particle.

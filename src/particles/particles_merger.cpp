@@ -37,7 +37,7 @@
 namespace particles {
 
 namespace {
-constexpr int REC = 11;   // per-sink record: x,y,z,vx,vy,vz,m,dx1,dx2,dx3,tag
+constexpr int REC = 8;   // per-sink record: x,y,z,vx,vy,vz,m,tag
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -58,7 +58,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   const int nmb = pmy_pack->nmb_thispack;
   const bool per = pmy_pack->pmesh->strictly_periodic;
   auto &msz = pmy_pack->pmesh->mesh_size;
-  const Real L[3] = {msz.x1max-msz.x1min, msz.x2max-msz.x2min, msz.x3max-msz.x3min};
   const Real dlo[3] = {msz.x1min, msz.x2min, msz.x3min};
 
   auto refresh_return = [&]() {
@@ -75,14 +74,10 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   Kokkos::deep_copy(hi, prtcl_idata);
   std::vector<Real> loc(static_cast<size_t>(nloc)*REC);
   for (int p = 0; p < nloc; ++p) {
-    int m = hi(PGID, p) - gids;
-    Real dx1 = msz_h(0).dx1, dx2 = msz_h(0).dx2, dx3 = msz_h(0).dx3;
-    if (m >= 0 && m < nmb) { dx1 = msz_h(m).dx1; dx2 = msz_h(m).dx2; dx3 = msz_h(m).dx3; }
     Real *rec = &loc[static_cast<size_t>(p)*REC];
     rec[0]=hr(IPX,p);  rec[1]=hr(IPY,p);  rec[2]=hr(IPZ,p);
     rec[3]=hr(IPVX,p); rec[4]=hr(IPVY,p); rec[5]=hr(IPVZ,p);
-    rec[6]=hr(IPM,p);  rec[7]=dx1; rec[8]=dx2; rec[9]=dx3;
-    rec[10]=static_cast<Real>(hi(PTAG,p));
+    rec[6]=hr(IPM,p);  rec[7]=static_cast<Real>(hi(PTAG,p));
   }
 
   // ---- gather every rank's sinks (cheap; sinks are few) ----
@@ -119,7 +114,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   {
     std::vector<int> tags(Ntot);
     for (int i = 0; i < Ntot; ++i) {
-      tags[i] = static_cast<int>(G[static_cast<size_t>(i)*REC + 10]);
+      tags[i] = static_cast<int>(G[static_cast<size_t>(i)*REC + 7]);
     }
     std::vector<int> sorted_tags = tags;
     std::sort(sorted_tags.begin(), sorted_tags.end());
@@ -142,40 +137,17 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   std::vector<SinkMergeRecord<Real>> sinks;
   for (int i=0; i<Ntot; ++i) {
     const Real *r=&G[static_cast<size_t>(i)*REC];
-    sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]}, {r[7],r[8],r[9]},
-                     r[6], 1.0, static_cast<int>(r[10])});
+    sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]},
+                     r[6], 1.0, static_cast<int>(r[7])});
   }
-  auto locate = [&](SinkMergeRecord<Real> &s) {
-    auto *pm=pmy_pack->pmesh;
-    for (int g=0; g<pm->nmb_total; ++g) {
-      const auto &ll=pm->lloc_eachmb[g];
-      const int shift=ll.level-pm->root_level;
-      const int nb[3]={pm->nmb_rootx1<<shift,pm->nmb_rootx2<<shift,
-                       pm->nmb_rootx3<<shift};
-      const auto ix=std::array<std::int64_t,3>{ll.lx1,ll.lx2,ll.lx3};
-      bool inside=true;
-      for (int c=0; c<3; ++c) {
-        const Real lo=LeftEdgeX(ix[c],nb[c],dlo[c],dlo[c]+L[c]);
-        const Real hi=LeftEdgeX(ix[c]+1,nb[c],dlo[c],dlo[c]+L[c]);
-        inside=inside && s.x[c]>=lo && s.x[c]<hi;
-      }
-      if (inside) {
-        s.dx={L[0]/(nb[0]*pm->mb_indcs.nx1), L[1]/(nb[1]*pm->mb_indcs.nx2),
-              L[2]/(nb[2]*pm->mb_indcs.nx3)};
-        return;
-      }
-    }
-    std::cerr << "Merged sink has no owning MeshBlock" << std::endl;
-    std::exit(EXIT_FAILURE);
-  };
   auto *pm=pmy_pack->pmesh;
   const int shift=pm->max_level-pm->root_level;
   const int nx1_eff=pm->mesh_indcs.nx1<<shift;
   const int nx2_eff=pm->mesh_indcs.nx2<<shift;
   const int nx3_eff=pm->mesh_indcs.nx3<<shift;
   ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
-                    std::array<Real,3>{L[0],L[1],L[2]},
-                    std::array<int,3>{nx1_eff,nx2_eff,nx3_eff}, per, locate);
+                    std::array<Real,3>{msz.x1max,msz.x2max,msz.x3max},
+                    std::array<int,3>{nx1_eff,nx2_eff,nx3_eff}, per);
   for (const auto &s : sinks) {
     if (!s.alive) {
       absorbed.insert(s.tag);
