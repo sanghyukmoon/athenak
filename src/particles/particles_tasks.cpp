@@ -27,6 +27,9 @@
 #include "coordinates/cell_locations.hpp"
 #include "bvals/bvals.hpp"
 #include "gravity/gravity.hpp"
+#include "driver/driver.hpp"
+#include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
 #include "particles.hpp"
 #include "particle_mesh.hpp"
 
@@ -159,6 +162,153 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     if (accretion) {
       id.accrete = tl["after_stagen"]->AddTask(&Particles::AccreteMass, this, dep);
       dep = id.accrete;
+      // Reuse the gas exchange after its ordinary stage buffers have been cleared.
+      // A global-list guard keeps ranks without local sinks in the same exchange.
+      // Negative stages post/clear only boundary receives (ordinary periodic path).
+      if (pmy_pack->phydro != nullptr) {
+        dep = dep | pmy_pack->phydro->id.crecv;
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->RestrictU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->InitRecv(d, -1);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->SendU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->RecvU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->Prolongate(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->ApplyPhysicalBCs(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->ConToPrim(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->NewTimeStep(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->ClearSend(d, -1);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->phydro->ClearRecv(d, -1);
+        }, dep);
+      }
+      if (pmy_pack->pmhd != nullptr) {
+        dep = dep | pmy_pack->pmhd->id.crecv;
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->RestrictU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->RestrictB(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->InitRecv(d, -1);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->SendU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->RecvU(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->SendB(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->RecvB(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->Prolongate(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->ApplyPhysicalBCs(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->ConToPrim(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->NewTimeStep(d, s);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->ClearSend(d, -1);
+        }, dep);
+        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
+            return TaskStatus::complete;
+          }
+          return pmy_pack->pmhd->ClearRecv(d, -1);
+        }, dep);
+      }
     }
     id.newdt = tl["after_stagen"]->AddTask(&Particles::NewTimeStep, this, dep);
   } else {
