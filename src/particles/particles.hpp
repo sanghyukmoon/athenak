@@ -111,7 +111,7 @@ class Particles {
   // Particle CFL number (<particles>/cfl_par, default 0.5): dtnew = cfl_par*min(dx/|v|)
   // over particles. Mesh::NewTimeStep applies NO cfl factor to ppart->dtnew and caps
   // per-cycle dt growth at 2x, so 0.5 guarantees sinks cross at most one cell per step
-  // (required by the control-volume accretion's cell-crossing correction).
+  // (required by neighbor-based particle migration).
   Real cfl_par;
 
   // Enable control-volume gas accretion onto sinks (<particles>/accretion, default
@@ -150,30 +150,6 @@ class Particles {
   void CheckSinkSanity(const char *where, int stage);
 
 
-  // Cross-rank control-volume reset (MPI). When a sink's control volume reaches into an
-  // off-rank neighbour, the accretion kernel stages the off-rank-destined reset cells
-  // (owner_m, xw, yw, zw, rho, M1..3 post-reset, rho, M1..3 pre-reset) into cvemit_
-  // (cvemit_cnt_ = atomic count); ExchangeCVReset() then routes them host-side to every
-  // rank whose blocks' expanded (interior+ghost) bounds contain the cell; each receiver
-  // scatters the values to ALL its local coincident copies of u0/w0, at whatever
-  // refinement level those copies live (see particles_accretion.cpp for the level rule --
-  // the pre-reset values are what make the coarser-target case conservative).
-  // Sized once accretion is enabled.
-  static constexpr int NCVEMIT = 12;   // m, x, y, z, 4 post-reset, 4 pre-reset
-  DvceArray2D<Real> cvemit_;      // [cvemit_max_][NCVEMIT] staging buffer (device)
-  DvceArray1D<int>  cvemit_cnt_;  // [1] atomic write counter (device)
-  int cvemit_max_ = 0;
-  // Count of sinks whose control volume could not be processed this step (defensively
-  // skipped, e.g. a >1 level jump in the reach). Reported once with a rate limit: a
-  // silently skipped sink stops accreting while gas keeps flowing in, which shows up
-  // much later as a pile-up and a collapsing timestep.
-  DvceArray1D<int>  accskip_;     // [1] atomic count of skipped sinks (device)
-  int accskip_warned_ = 0;
-#if MPI_PARALLEL_ENABLED
-  // dedicated communicator for the CV scatter
-  MPI_Comm mpi_comm_cvscat_ = MPI_COMM_NULL;
-#endif
-
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;
 
@@ -193,8 +169,7 @@ class Particles {
   // ---- host / MPI phase timers (env SINK_TIMERS) --------------------------------------
   // Wall-clock accounting for the sink module's HOST and MPI regions -- precisely what a
   // Kokkos profiler cannot see. kokkos-tools reports device kernels by label, but the
-  // per-step collectives, the host<->device particle mirrors and the host colouring loop
-  // are invisible to it, and those are the suspected cost at scale.
+  // per-step collectives and host<->device particle mirrors are invisible to it.
   //
   //   SINK_TIMERS=1  accumulate and report. Low perturbation, but Kokkos kernels are
   //                  asynchronous, so a region can absorb the completion of work launched
@@ -205,9 +180,8 @@ class Particles {
   //                  EXPOSES rather than causes. Perturbing by construction: an
   //                  attribution run, never a timing run.
   //
-  // ST_REFRESH is nested inside ST_CREATE and ST_MERGE, and ST_ALLTOALL inside
-  // ST_CVRESET, so those totals are INCLUSIVE -- do not add the column up.
-  enum SinkTimerId {ST_COLOUR=0, ST_CVRESET, ST_ALLTOALL, ST_CREATE, ST_MERGE, ST_REFRESH,
+  // ST_REFRESH is nested inside ST_CREATE and ST_MERGE, so totals are inclusive.
+  enum SinkTimerId {ST_CREATE=0, ST_MERGE, ST_REFRESH,
                     ST_NUM};
   int st_mode_ = 0;
   double st_time_[ST_NUM] = {};
@@ -267,7 +241,6 @@ class Particles {
   TaskStatus Push(Driver *pdriver, int stage);
   TaskStatus MergeSinks(Driver *pdriver, int stage);
   TaskStatus AccreteMass(Driver *pdriver, int stage);
-  void ExchangeCVReset();   // MPI: apply off-rank control-volume reset cells
   TaskStatus CreateSinks(Driver *pdriver, int stage);
   TaskStatus NewTimeStep(Driver *pdriver, int stage);
   TaskStatus NewGID(Driver *pdriver, int stage);

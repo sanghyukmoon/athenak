@@ -210,11 +210,10 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     hr(IPX,p)=s.x;   hr(IPY,p)=s.y;   hr(IPZ,p)=s.z;
     hr(IPVX,p)=s.vx; hr(IPVY,p)=s.vy; hr(IPVZ,p)=s.vz;
     hr(IPM,p)=s.M;
-    // treat the merge as NOT a cell crossing so the following AccreteMass does not
-    // re-accrete a spurious old control volume
+    // Keep previous-position state consistent with the moved survivor.
     hr(IPX0,p)=s.x;  hr(IPY0,p)=s.y;  hr(IPZ0,p)=s.z;
     // re-derive the owning block from the COM (lower-inclusive). If the COM left this
-    // rank, keep the old PGID; the migration chain relocates the sink next cycle.
+    // rank, keep the old PGID; the migration chain relocates the sink before accretion.
     for (int mm = 0; mm < nmb; ++mm) {
       if (s.x >= msz_h(mm).x1min && s.x < msz_h(mm).x1max &&
           s.y >= msz_h(mm).x2min && s.y < msz_h(mm).x2max &&

@@ -167,18 +167,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     pbval_phi->InitializeBuffers(1);
   }
 
-  // Staging buffer + communicator for the cross-rank control-volume reset (MPI).
-  // Capacity covers each sink's 27 reset cells; overflow is guarded + warned in the kernel.
-  if (particle_type == ParticleType::sink && accretion) {
-    cvemit_max_ = std::max(1, nprtcl_thispack)*64;
-    Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
-    Kokkos::realloc(cvemit_cnt_, 1);
-    Kokkos::realloc(accskip_, 1);
-#if MPI_PARALLEL_ENABLED
-    MPI_Comm_dup(MPI_COMM_WORLD, &mpi_comm_cvscat_);
-#endif
-  }
-
   // allocate boundary object
   pbval_part = new ParticlesBoundaryValues(this, pin);
 }
@@ -243,8 +231,7 @@ void Particles::StEnd(int id, double t0) {
 void Particles::ReportSinkTimers(double wall_seconds) {
   if (st_mode_ <= 0) return;
   const int n = ST_NUM;
-  const char *name[ST_NUM] = {"colour(host+mirror)", "cv_reset(total)",
-                              "  MPI_Alltoall", "create_sinks", "merge_sinks",
+  const char *name[ST_NUM] = {"create_sinks", "merge_sinks",
                               "refresh_counts"};
   double tmax[ST_NUM], tsum[ST_NUM], wmax[ST_NUM];
   std::int64_t csum[ST_NUM];
@@ -265,8 +252,8 @@ void Particles::ReportSinkTimers(double wall_seconds) {
   std::printf("\n### SINK TIMERS  mode=%d  ranks=%d  wall=%.4f s"
               "  (host/MPI regions only -- device kernels are kokkos-tools' job)\n",
               st_mode_, nr, wall_seconds);
-  std::printf("###   ST_ALLTOALL is nested in ST_CVRESET, and refresh_counts in "
-              "create/merge: totals are INCLUSIVE, do not sum the column.\n");
+  std::printf("###   refresh_counts is nested in create/merge: totals are INCLUSIVE, "
+              "do not sum the column.\n");
   std::printf("### %-20s %10s %12s %12s %12s %8s\n",
               "region", "calls", "max_s", "mean_s", "wait_max_s", "%wall");
   for (int i = 0; i < n; ++i) {
@@ -280,28 +267,12 @@ void Particles::ReportSinkTimers(double wall_seconds) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Particles::ResizeParticles(int npart_new)
-//! \brief Resize the particle arrays to npart_new, grow the buffers that were sized from
-//! the ppc-derived count, and refresh the Mesh's global particle bookkeeping.
-//!
-//! The constructor sizes cvemit_ (the cross-rank control-volume reset staging buffer) as
-//! max(1, nprtcl_thispack)*64 records, from the count ppc implied BEFORE the pgen runs. A
-//! restart or IC that restores/seeds sinks typically runs with ppc = 0, so that
-//! buffer would hold 64 records total no matter how many sinks are seeded. Grow it here,
-//! so the caller only has to state how many particles it needs.
+//! \brief Resize the particle arrays and refresh global particle bookkeeping.
 
 void Particles::ResizeParticles(int npart_new) {
   Kokkos::resize(prtcl_rdata, nrdata, npart_new);
   Kokkos::resize(prtcl_idata, nidata, npart_new);
   nprtcl_thispack = npart_new;
-
-  // grow-only: never shrink below what a previous sizing already allocated
-  if (particle_type == ParticleType::sink && accretion) {
-    const int need = std::max(1, npart_new)*64;
-    if (need > cvemit_max_) {
-      cvemit_max_ = need;
-      Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
-    }
-  }
 
   RefreshMeshParticleCounts();
 }
