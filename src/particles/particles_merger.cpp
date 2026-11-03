@@ -168,8 +168,14 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     std::cerr << "Merged sink has no owning MeshBlock" << std::endl;
     std::exit(EXIT_FAILURE);
   };
+  auto *pm=pmy_pack->pmesh;
+  const int shift=pm->max_level-pm->root_level;
+  const int nx1_eff=pm->mesh_indcs.nx1<<shift;
+  const int nx2_eff=pm->mesh_indcs.nx2<<shift;
+  const int nx3_eff=pm->mesh_indcs.nx3<<shift;
   ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
-                    std::array<Real,3>{L[0],L[1],L[2]}, per, locate);
+                    std::array<Real,3>{L[0],L[1],L[2]},
+                    std::array<int,3>{nx1_eff,nx2_eff,nx3_eff}, per, locate);
   for (const auto &s : sinks) {
     if (!s.alive) {
       absorbed.insert(s.tag);
