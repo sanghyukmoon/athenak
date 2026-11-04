@@ -36,7 +36,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "particles.hpp"
-#include "sink_convergence.hpp"
+#include "sink_particles.hpp"
 
 namespace particles {
 

@@ -38,7 +38,7 @@
 #include "eos/eos.hpp"
 #include "gravity/gravity.hpp"
 #include "particles.hpp"
-#include "sink_convergence.hpp"
+#include "sink_particles.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>

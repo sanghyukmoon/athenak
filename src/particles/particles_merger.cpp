@@ -27,7 +27,7 @@
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
 #include "particles.hpp"
-#include "sink_merge.hpp"
+#include "sink_particles.hpp"
 #include "coordinates/cell_locations.hpp"
 
 #if MPI_PARALLEL_ENABLED
