@@ -42,10 +42,9 @@ namespace particles {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus Particles::AccreteMass
-//! \brief accrete gas in the control volume onto each sink particle (last RK stage only).
+//! \brief accrete gas in the control volume onto each sink particle.
 
 TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
-  // operator split: accrete once per step, at the final stage, after the hydro update
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;
   if (particle_type != ParticleType::sink) return TaskStatus::complete;
   if (!(pmy_pack->pmesh->three_d)) return TaskStatus::complete;
@@ -76,7 +75,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const int nmb = pmy_pack->nmb_thispack;
   const int gids = pmy_pack->gids;
   const int nlocal = nprtcl_thispack;
-  const int convergence = sink_convergence;
+  const int mode = sink_convergence;
 
   // Logical locations are host data. Copy exact finest-grid block offsets once;
   // coarse blocks are excluded before these offsets are used in the kernel.
@@ -119,27 +118,33 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const size_t scr_bytes = ScrArray2D<Real>::shmem_size(4, 27)
                          + ScrArray1D<Real>::shmem_size(iaccept+1);
 
+  // Loop over MeshBlock - sink particle pair
   par_for_outer("sink_accrete", DevExeSpace(), scr_bytes, scr_level,
                 0, nmb-1, 0, nsinks-1,
   KOKKOS_LAMBDA(TeamMember_t member, const int m, const int p) {
     // By contract, sinks and their control volumes are always at finest level.
     // Thus, if the block is not at the finest level, safe to return early.
     if (mb_lev(m) != max_level) return;
+
+
+    // If no interaction bewteen sink p and meshblock m, return.
     int ip_eff[3];
-    if (!SinkOverlapsMeshBlock(m, p, periodic, ip_eff)) {
-      return;
-    }
-    const int ic = ip_eff[0]-off(m,0)+indcs.is;
-    const int jc = ip_eff[1]-off(m,1)+indcs.js;
-    const int kc = ip_eff[2]-off(m,2)+indcs.ks;
-    if (!SinkConverging(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p),
-                        gr(IPVZ,p), convergence)) {
+    if (!SinkOverlapsMeshBlock(m, p, periodic, ip_eff)) return;
+
+    // Otherwise, calculate local index and proceed
+    const int ic = ip_eff[0] - off(m,0) + indcs.is;
+    const int jc = ip_eff[1] - off(m,1) + indcs.js;
+    const int kc = ip_eff[2] - off(m,2) + indcs.ks;
+
+    // Check converging flow condition
+    if (!ConvergingFlow(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p), gr(IPVZ,p), mode)) {
       if (gr(IPM,p) == 0.0) {
-        Kokkos::abort("Massless sink failed convergence in AccreteMass.");
+        Kokkos::abort("Newly created sink failed to satisfy converging flow condition");
       }
       return;
     }
 
+    // Reset control volume
     ScrArray2D<Real> scr(member.team_scratch(scr_level), 4, 27);
     ScrArray1D<Real> acc(member.team_scratch(scr_level), iaccept+1);
     par_for_inner(member, 0, 26, [&](const int c) {

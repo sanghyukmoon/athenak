@@ -49,7 +49,7 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   accretion = pin->GetOrAddBoolean("particles","accretion",false);
   // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
   creation = pin->GetOrAddBoolean("particles","creation",true);
-  creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", false);
+  creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", true);
   const std::string convergence = pin->GetOrAddString(
       "particles", "sink_convergence", "mass_flux");
   if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {

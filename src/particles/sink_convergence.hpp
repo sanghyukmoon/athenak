@@ -13,7 +13,7 @@ namespace particles {
 // Strict inflow on each pair of CV faces. Uniform face areas cancel within an axis.
 // Use conserved variables so the check sees the same state as the proposed reset.
 template<class View>
-KOKKOS_INLINE_FUNCTION bool SinkConverging(const View &u, int m, int i, int j, int k,
+KOKKOS_INLINE_FUNCTION bool ConvergingFlow(const View &u, int m, int i, int j, int k,
                                           Real vx, Real vy, Real vz, int mode) {
   if (mode == 0) return true;
   const Real vref[3] = {vx, vy, vz};

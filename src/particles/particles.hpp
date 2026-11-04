@@ -114,27 +114,12 @@ class Particles {
   // (required by neighbor-based particle migration).
   Real cfl_par;
 
-  // Enable control-volume gas accretion onto sinks (<particles>/accretion, default
-  // false). When false the AccreteMass task is not registered at all, so orbit tests
-  // with inert/no gas never execute the accretion kernel.
-  bool accretion = false;
-
-  // Enable sink creation (<particles>/creation, default true): cells exceeding the
-  // Larson-Penston density threshold at a local potential minimum spawn a massless
-  // sink that the next AccreteMass reset seeds conservatively (Moon & Ostriker 2025
-  // section 3.4). Requires accretion = true.
-  bool creation = true;
-  // Optional AMR experiment: retain the uniform finest-grid creation threshold.
-  bool creation_finest_only = false;
+  bool accretion;
+  bool creation;
+  bool creation_finest_only;
   int created_total_ = 0;   // running count, for unique tags
 
-  // Sink-sink merging is unconditional: sinks whose 27-cell control volumes overlap
-  // or share a face are combined, conserving mass and
-  // linear momentum. Independent of accretion (a decaying gravitational binary can merge
-  // with accretion off), but typically used with it -- merging removes the overlapping
-  // control volumes that AccreteMass cannot otherwise handle, so it is ordered
-  // create -> merge -> accrete. See particles_merger.cpp.
-  int sink_convergence = 1;  // 0: off; 1: directional mass flux; 2: velocity gradient
+  int sink_convergence;  // 0: off; 1: directional mass flux; 2: velocity gradient
 
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;

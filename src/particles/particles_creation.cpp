@@ -82,7 +82,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   const int nmb = pmy_pack->nmb_thispack;
   const int npart = nprtcl_thispack;
 
-  const int convergence = sink_convergence;
+  const int mode = sink_convergence;
   const bool finest_only = creation_finest_only;
   const int max_level = pmy_pack->pmesh->max_level;
   auto levels = pmy_pack->pmb->mb_lev.d_view;
@@ -106,7 +106,7 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
     const Real rho_thr = thr_fac/(dx1*dx1);
     const Real rho = u0(m, IDN, k, j, i);
     if (rho <= rho_thr) return;
-    if (!SinkConverging(u0, m, i, j, k, 0.0, 0.0, 0.0, convergence)) return;
+    if (!ConvergingFlow(u0, m, i, j, k, 0.0, 0.0, 0.0, mode)) return;
     // local potential minimum over the 26 neighbours (phi ghosts valid: the XPhi tasks
     // ran this stage)
     const Real p0 = phi(m, 0, k, j, i);
