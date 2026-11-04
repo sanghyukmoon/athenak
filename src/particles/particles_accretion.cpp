@@ -62,15 +62,15 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   auto mb_lev = pmy_pack->pmb->mb_lev.d_view;
   auto *pm = pmy_pack->pmesh;
   const auto indcs = pm->mb_indcs;
-  const auto msz = pm->mesh_size;
+  const auto msh_sz = pm->mesh_size;
   const int max_level = pm->max_level;
   const int shift = max_level - pm->root_level;
   const int nx1_eff = pm->mesh_indcs.nx1 << shift;
   const int nx2_eff = pm->mesh_indcs.nx2 << shift;
   const int nx3_eff = pm->mesh_indcs.nx3 << shift;
-  const Real dx1 = (msz.x1max-msz.x1min)/nx1_eff;
-  const Real dx2 = (msz.x2max-msz.x2min)/nx2_eff;
-  const Real dx3 = (msz.x3max-msz.x3min)/nx3_eff;
+  const Real dx1 = (msh_sz.x1max-msh_sz.x1min)/nx1_eff;
+  const Real dx2 = (msh_sz.x2max-msh_sz.x2min)/nx2_eff;
+  const Real dx3 = (msh_sz.x3max-msh_sz.x3min)/nx3_eff;
   const Real dV = dx1*dx2*dx3;
   const bool periodic = pm->strictly_periodic;
   const int nmb = pmy_pack->nmb_thispack;
@@ -99,30 +99,27 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   par_for_outer("sink_accrete", DevExeSpace(), scr_bytes, scr_level,
                 0, nmb-1, 0, nsinks-1,
   KOKKOS_LAMBDA(TeamMember_t member, const int m, const int p) {
+    // By contract, sinks and their control volumes are always at finest level.
+    // Thus, if the block is not at the finest level, safe to return early.
     if (mb_lev(m) != max_level) return;
-    const int nx[3] = {nx1_eff, nx2_eff, nx3_eff};
-    const int nb[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
-    const Real lo[3] = {msz.x1min, msz.x2min, msz.x3min};
-    const Real hi[3] = {msz.x1max, msz.x2max, msz.x3max};
+    const int nx_eff[3] = {nx1_eff, nx2_eff, nx3_eff};
+    const int nx[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
+    const Real le[3] = {msh_sz.x1min, msh_sz.x2min, msh_sz.x3min};
+    const Real re[3] = {msh_sz.x1max, msh_sz.x2max, msh_sz.x3max};
     const Real xp[3] = {gr(IPX,p), gr(IPY,p), gr(IPZ,p)};
-    int center[3];
+    int ip_eff[3]; // effective finest-resolution index of the particle-containing cell
     for (int axis=0; axis<3; ++axis) {
-      Real x = xp[axis];
+      ip_eff[axis] = CellCenterIndex(xp[axis], nx_eff[axis], le[axis], re[axis]);
       if (periodic) {
-        const Real length = hi[axis]-lo[axis];
-        x -= length*Kokkos::floor((x-lo[axis])/length);
+        if (ip_eff[axis] < off(m,axis)-1) ip_eff[axis] += nx_eff[axis];
+        if (ip_eff[axis] > off(m,axis)+nx[axis]) ip_eff[axis] -= nx_eff[axis];
       }
-      center[axis] = CellCenterIndex(x,nx[axis],lo[axis],hi[axis]);
-      if (periodic) {
-        if (center[axis] < off(m,axis)-1) center[axis] += nx[axis];
-        if (center[axis] > off(m,axis)+nb[axis]) center[axis] -= nx[axis];
-      }
-      if (center[axis] < off(m,axis)-1 ||
-          center[axis] > off(m,axis)+nb[axis]) return;
+      if (ip_eff[axis] < off(m,axis)-1 ||
+          ip_eff[axis] > off(m,axis)+nx[axis]) return;
     }
-    const int ic = center[0]-off(m,0)+indcs.is;
-    const int jc = center[1]-off(m,1)+indcs.js;
-    const int kc = center[2]-off(m,2)+indcs.ks;
+    const int ic = ip_eff[0]-off(m,0)+indcs.is;
+    const int jc = ip_eff[1]-off(m,1)+indcs.js;
+    const int kc = ip_eff[2]-off(m,2)+indcs.ks;
     if (!SinkConverging(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p),
                         gr(IPVZ,p), convergence)) {
       if (gr(IPM,p) == 0.0) {
@@ -191,10 +188,10 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       const int delta[3] = {c%3-1, (c/3)%3-1, c/9-1};
       int local[3];
       for (int axis=0; axis<3; ++axis) {
-        int cell = center[axis]+delta[axis];
-        if (periodic) cell = (cell+nx[axis])%nx[axis];
+        int cell = ip_eff[axis]+delta[axis];
+        if (periodic) cell = (cell+nx_eff[axis])%nx_eff[axis];
         local[axis] = cell-off(m,axis);
-        if (local[axis] < 0 || local[axis] >= nb[axis]) return;
+        if (local[axis] < 0 || local[axis] >= nx[axis]) return;
       }
       // Read images can be ghosts even when the wrapped write belongs to the
       // opposite active edge of a block spanning an entire periodic direction.
