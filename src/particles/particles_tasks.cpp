@@ -128,14 +128,6 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.crecv  = tl["stagen"]->AddTask(&Particles::ClearRecv, this, id.recvp);
     id.csend  = tl["stagen"]->AddTask(&Particles::ClearSend, this, id.crecv);
 
-    // operator-split sink physics at the last RK stage, ordered create -> merge ->
-    // accrete. Creation and accretion follow their flags; merging always runs and
-    // completes survivor migration before accretion.
-    //   create  (<particles>/creation) : new sinks are massless; the AccreteMass reset
-    //           that follows seeds them conservatively (Moon & Ostriker 2025 eq. 54).
-    //   merge                       : combine overlapping/face-touching CVs, so
-    //           AccreteMass never sees overlapping control volumes.
-    //   accrete (<particles>/accretion): control-volume gas -> sink.
     // release the potential exchange's buffers once the stage is done with them
     id.xphi_csend = tl["after_stagen"]->AddTask(&Particles::XPhiClearSend, this, none);
     id.xphi_crecv = tl["after_stagen"]->AddTask(&Particles::XPhiClearRecv, this,
@@ -145,83 +137,90 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.dm_crecv = tl["after_stagen"]->AddTask(&Particles::DMeshClearRecv, this,
                                               id.dm_csend);
 
+    // Operator-split sink physics after the time integrator, ordered create -> merge ->
+    // accrete. Creation and accretion follow their flags; merging always runs and
+    // completes survivor migration before accretion.
+    //   create  (<particles>/creation) : new sinks are massless; the AccreteMass reset
+    //           that follows seeds them conservatively (Moon & Ostriker 2025 eq. 54).
+    //   merge                       : combine overlapping/face-touching CVs, so
+    //           AccreteMass never sees overlapping control volumes.
+    //   accrete (<particles>/accretion): control-volume gas -> sink.
     TaskID dep = none;
     if (accretion && creation) {
-      id.create = tl["after_stagen"]->AddTask(&Particles::CreateSinks, this, dep);
+      id.create = tl["after_timeintegrator"]->AddTask(&Particles::CreateSinks, this, dep);
       dep = id.create;
     }
-    id.merge = tl["after_stagen"]->AddTask(&Particles::MergeSinks, this, dep);
+    id.merge = tl["after_timeintegrator"]->AddTask(&Particles::MergeSinks, this, dep);
     dep = id.merge;
-    dep = tl["after_stagen"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::SendCnt, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::InitRecv, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::SendP, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::RecvP, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::ClearRecv, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::ClearSend, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::SendCnt, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::InitRecv, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::SendP, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::RecvP, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::ClearRecv, this, dep);
+    dep = tl["after_timeintegrator"]->AddTask(&Particles::ClearSend, this, dep);
     if (accretion) {
-      id.accrete = tl["after_stagen"]->AddTask(&Particles::AccreteMass, this, dep);
+      id.accrete = tl["after_timeintegrator"]->AddTask(&Particles::AccreteMass, this, dep);
       dep = id.accrete;
-      // Reuse the gas exchange after its ordinary stage buffers have been cleared.
+      // The completed after_stagen list has cleared the ordinary gas exchange.
       // A global-list guard keeps ranks without local sinks in the same exchange.
       // Negative stages post/clear only boundary receives (ordinary periodic path).
       if (pmy_pack->phydro != nullptr) {
-        dep = dep | pmy_pack->phydro->id.crecv;
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->RestrictU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->InitRecv(d, -1);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->SendU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->RecvU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->Prolongate(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->ApplyPhysicalBCs(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->ConToPrim(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->NewTimeStep(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->phydro->ClearSend(d, -1);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
@@ -229,80 +228,79 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
         }, dep);
       }
       if (pmy_pack->pmhd != nullptr) {
-        dep = dep | pmy_pack->pmhd->id.crecv;
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->RestrictU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->RestrictB(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->InitRecv(d, -1);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->SendU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->RecvU(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->SendB(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->RecvB(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->Prolongate(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->ApplyPhysicalBCs(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->ConToPrim(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->NewTimeStep(d, s);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
           return pmy_pack->pmhd->ClearSend(d, -1);
         }, dep);
-        dep = tl["after_stagen"]->AddTask([this](Driver *d, int s) {
+        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
           if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
             return TaskStatus::complete;
           }
@@ -310,7 +308,7 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
         }, dep);
       }
     }
-    id.newdt = tl["after_stagen"]->AddTask(&Particles::NewTimeStep, this, dep);
+    id.newdt = tl["after_timeintegrator"]->AddTask(&Particles::NewTimeStep, this, dep);
   } else {
     // Tracer / cosmic-ray (drift) particles: integrated once per cycle in the
     // "before_timeintegrator" task list (no gravity coupling).
