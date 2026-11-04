@@ -50,9 +50,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
   creation = pin->GetOrAddBoolean("particles","creation",true);
   creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", false);
-  sanity_vmax = pin->GetOrAddReal("particles", "sanity_vmax", 0.0);
-  sanity_flag_ = DvceArray1D<int>("sanity_flag", 1);
-  sanity_rec_ = DvceArray1D<Real>("sanity_rec", kSanityRec);
   const std::string convergence = pin->GetOrAddString(
       "particles", "sink_convergence", "mass_flux");
   if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {
@@ -329,64 +326,6 @@ void Particles::CreateParticleTags(ParameterInput *pin) {
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn void Particles::CheckSinkSanity
-//! \brief Abort with a full report on the first non-finite or absurd sink (see the
-//! sanity_vmax comment in particles.hpp). WHERE names the step that just ran; together
-//! with the clean check after the previous step it brackets the update that broke it.
-
-void Particles::CheckSinkSanity(const char *where, int stage) {
-  if (sanity_vmax <= 0.0 || particle_type != ParticleType::sink) return;
-  auto &pr = prtcl_rdata;
-  const Real vmax2 = sanity_vmax*sanity_vmax;
-  int nbad = 0;
-  if (nprtcl_thispack > 0) {
-    Kokkos::parallel_reduce("sink_sanity", Kokkos::RangePolicy<>(DevExeSpace(), 0,
-                            nprtcl_thispack),
-    KOKKOS_LAMBDA(const int p, int &n) {
-      const Real v2 = pr(IPVX, p)*pr(IPVX, p) + pr(IPVY, p)*pr(IPVY, p)
-                    + pr(IPVZ, p)*pr(IPVZ, p);
-      const Real s = pr(IPX, p) + pr(IPY, p) + pr(IPZ, p) + pr(IPM, p);
-      // written so that a NaN fails every comparison
-      if (!(v2 <= vmax2) || !(Kokkos::fabs(s) < 1.0e300) || !(pr(IPM, p) >= 0.0)) n += 1;
-    }, Kokkos::Sum<int>(nbad));
-  }
-  auto flag_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), sanity_flag_);
-  if (nbad == 0 && flag_h(0) == 0) return;
-
-  auto hr = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_rdata);
-  auto hi = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_idata);
-  auto rec = Kokkos::create_mirror_view_and_copy(HostMemSpace(), sanity_rec_);
-  auto *pm = pmy_pack->pmesh;
-  std::printf("### SINK SANITY: %d bad sink(s) after %s (stage %d) on rank %d, cycle=%d "
-              "time=%.17e dt=%.17e, %d local sink(s), sanity_vmax=%g\n", nbad, where,
-              stage, global_variable::my_rank, pm->ncycle, pm->time, pm->dt,
-              nprtcl_thispack, sanity_vmax);
-  if (flag_h(0) == 1) {
-    std::printf("### SINK SANITY: push produced it: tag=%.0f v_old=(%.17e, %.17e, %.17e) "
-                "g=(%.17e, %.17e, %.17e) half_dt=%.17e v_new=(%.17e, %.17e, %.17e) "
-                "x=(%.17e, %.17e, %.17e) m=%.17e\n", rec(0), rec(1), rec(2), rec(3),
-                rec(4), rec(5), rec(6), rec(7), rec(8), rec(9), rec(10), rec(11), rec(12),
-                rec(13), rec(14));
-  } else if (flag_h(0) == 2) {
-    std::printf("### SINK SANITY: accretion produced it: tag=%.0f m_old=%.17e dm=%.17e "
-                "dp=(%.17e, %.17e, %.17e) v_old=(%.17e, %.17e, %.17e) "
-                "v_new=(%.17e, %.17e, %.17e) x=(%.17e, %.17e, %.17e)\n", rec(0), rec(1),
-                rec(2), rec(3), rec(4), rec(5), rec(6), rec(7), rec(8), rec(9), rec(10),
-                rec(11), rec(12), rec(13), rec(14));
-  }
-  for (int p = 0; p < nprtcl_thispack; ++p) {
-    std::printf("### SINK SANITY:   p=%d tag=%d gid=%d", p, hi(PTAG, p), hi(PGID, p));
-    for (int r = 0; r < nrdata; ++r) std::printf(" r%d=%.17e", r, hr(r, p));
-    std::printf("\n");
-  }
-  std::fflush(stdout);
-#if MPI_PARALLEL_ENABLED
-  MPI_Abort(MPI_COMM_WORLD, 86);
-#endif
-  std::exit(EXIT_FAILURE);
 }
 
 } // namespace particles

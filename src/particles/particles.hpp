@@ -136,20 +136,6 @@ class Particles {
   // create -> merge -> accrete. See particles_merger.cpp.
   int sink_convergence = 1;  // 0: off; 1: directional mass flux; 2: velocity gradient
 
-  // Sink sanity check (<particles>/sanity_vmax, default 0 = off). When > 0, every step
-  // that changes sink state (push, migration receive, creation, merging, accretion) and
-  // the particle timestep check the rank's sinks for a non-finite position, velocity or
-  // mass, a negative mass, or a speed above sanity_vmax. The first hit prints the full
-  // record of every local sink -- plus, when the push or the accretion update produced
-  // the bad velocity, the inputs it was computed from -- and aborts the run. It only
-  // reads particle state, so a run that never trips it is bit-for-bit unchanged.
-  Real sanity_vmax = 0.0;
-  static constexpr int kSanityRec = 16;
-  DvceArray1D<int>  sanity_flag_;   // [1] 0 = clean, 1 = push, 2 = accretion
-  DvceArray1D<Real> sanity_rec_;    // [kSanityRec] inputs of the first flagged update
-  void CheckSinkSanity(const char *where, int stage);
-
-
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;
 

@@ -91,12 +91,10 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   mb_offset.template sync<DevExeSpace>();
   auto off = mb_offset.d_view;
 
+  constexpr int iaccept = 4;
   const int scr_level = 0;
   const size_t scr_bytes = ScrArray2D<Real>::shmem_size(4, 27)
-                         + ScrArray1D<Real>::shmem_size(5);
-  const Real svmax2 = sanity_vmax > 0.0 ? sanity_vmax*sanity_vmax : -1.0;
-  auto sflag = sanity_flag_;
-  auto srec = sanity_rec_;
+                         + ScrArray1D<Real>::shmem_size(iaccept+1);
 
   par_for_outer("sink_accrete", DevExeSpace(), scr_bytes, scr_level,
                 0, nmb-1, 0, nsinks-1,
@@ -134,7 +132,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
     }
 
     ScrArray2D<Real> scr(member.team_scratch(scr_level), 4, 27);
-    ScrArray1D<Real> acc(member.team_scratch(scr_level), 5);
+    ScrArray1D<Real> acc(member.team_scratch(scr_level), iaccept+1);
     par_for_inner(member, 0, 26, [&](const int c) {
       const int di = c%3-1, dj = (c/3)%3-1, dk = c/9-1;
       const int nnz = (di != 0)+(dj != 0)+(dk != 0);
@@ -167,8 +165,8 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
       if (gr(IPM,p) == 0.0 && !(acc(0) > 0.0)) {
         Kokkos::abort("Massless sink has nonpositive mass gain in AccreteMass.");
       }
-      acc(4) = reset_mass > old_mass ? 0.0 : 1.0;
-      if (acc(4) == 0.0) return;
+      acc(iaccept) = reset_mass > old_mass ? 0.0 : 1.0;
+      if (acc(iaccept) == 0.0) return;
 
       // Migration may reorder the local arrays. Only the matching owner team
       // credits the complete CV difference; other teams only reset their gas.
@@ -182,25 +180,12 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
           pr(IPVY,q) = (mp*vy0+acc(2))*minv;
           pr(IPVZ,q) = (mp*vz0+acc(3))*minv;
           pr(IPM,q) = mnew;
-          if (svmax2 > 0.0) {
-            const Real v2 = pr(IPVX,q)*pr(IPVX,q)+pr(IPVY,q)*pr(IPVY,q)
-                          +pr(IPVZ,q)*pr(IPVZ,q);
-            if (!(v2 <= svmax2) &&
-                Kokkos::atomic_compare_exchange(&sflag(0), 0, 2) == 0) {
-              srec(0) = static_cast<Real>(pi(PTAG,q));
-              srec(1) = mp; srec(2) = acc(0);
-              srec(3) = acc(1); srec(4) = acc(2); srec(5) = acc(3);
-              srec(6) = vx0; srec(7) = vy0; srec(8) = vz0;
-              srec(9) = pr(IPVX,q); srec(10) = pr(IPVY,q); srec(11) = pr(IPVZ,q);
-              srec(12) = pr(IPX,q); srec(13) = pr(IPY,q); srec(14) = pr(IPZ,q);
-            }
-          }
         }
         break;
       }
     });
     member.team_barrier();
-    if (acc(4) == 0.0) return;
+    if (acc(iaccept) == 0.0) return;
 
     par_for_inner(member, 0, 26, [&](const int c) {
       const int delta[3] = {c%3-1, (c/3)%3-1, c/9-1};
@@ -219,7 +204,6 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
     });
   });
 
-  CheckSinkSanity("accrete", stage);
   return TaskStatus::complete;
 }
 

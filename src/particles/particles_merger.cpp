@@ -62,7 +62,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 
   auto refresh_return = [&]() {
     RefreshMeshParticleCounts();
-    CheckSinkSanity("merge", stage);
     return TaskStatus::complete;
   };
 

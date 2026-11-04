@@ -163,148 +163,47 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
       id.accrete = tl["after_timeintegrator"]->AddTask(&Particles::AccreteMass, this, dep);
       dep = id.accrete;
       // The completed after_stagen list has cleared the ordinary gas exchange.
-      // A global-list guard keeps ranks without local sinks in the same exchange.
-      // Negative stages post/clear only boundary receives (ordinary periodic path).
+      // Stage -1 initializes/clears boundary communication without flux exchange.
       if (pmy_pack->phydro != nullptr) {
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->RestrictU(d, s);
+        auto *phydro = pmy_pack->phydro;
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RestrictU, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->InitRecv(d, -1);
         }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->InitRecv(d, -1);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::SendU, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RecvU, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::Prolongate, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ApplyPhysicalBCs,
+                                                phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ConToPrim, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::NewTimeStep, phydro, dep);
+        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->ClearSend(d, -1);
         }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->SendU(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->RecvU(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->Prolongate(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->ApplyPhysicalBCs(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->ConToPrim(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->NewTimeStep(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->ClearSend(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->phydro->ClearRecv(d, -1);
+        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->ClearRecv(d, -1);
         }, dep);
       }
       if (pmy_pack->pmhd != nullptr) {
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->RestrictU(d, s);
+        auto *pmhd = pmy_pack->pmhd;
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictU, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictB, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->InitRecv(d, -1);
         }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->RestrictB(d, s);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendU, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvU, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendB, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvB, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::Prolongate, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ApplyPhysicalBCs, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ConToPrim, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::NewTimeStep, pmhd, dep);
+        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->ClearSend(d, -1);
         }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->InitRecv(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->SendU(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->RecvU(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->SendB(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->RecvB(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->Prolongate(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->ApplyPhysicalBCs(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->ConToPrim(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->NewTimeStep(d, s);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->ClearSend(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([this](Driver *d, int s) {
-          if (s != d->nexp_stages || global_prtcl_tags.extent_int(0) == 0) {
-            return TaskStatus::complete;
-          }
-          return pmy_pack->pmhd->ClearRecv(d, -1);
+        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->ClearRecv(d, -1);
         }, dep);
       }
     }
@@ -367,10 +266,8 @@ TaskStatus Particles::SetGIDFromPosition(Driver *pdrive, int stage) {
     return TaskStatus::complete;
   }
 
-  // On strictly periodic meshes, wrap particle positions back into the domain when
-  // they exit (e.g. bulk-advection tests). The start-of-step position IPX0 is shifted
-  // by the SAME offset so cell-crossing detection in AccreteMass stays consistent
-  // across the wrap.
+  // On strictly periodic meshes, wrap current and saved start-of-step positions by
+  // the same offset so RK3 combines positions in the same periodic image.
   const bool wrap = pmy_pack->pmesh->strictly_periodic;
   const bool has_prev = (nrdata > IPX0);   // IPX0.. exist only in the sink layout
   auto &msz = pmy_pack->pmesh->mesh_size;
@@ -403,9 +300,7 @@ TaskStatus Particles::SetGIDFromPosition(Driver *pdrive, int stage) {
   Kokkos::deep_copy(d_nstray, 0);
 
   par_for("part_setgid", DevExeSpace(), 0, npart-1, KOKKOS_LAMBDA(const int p) {
-    // wrap positions back into the domain on strictly-periodic meshes (IPX0 shifted by
-    // the same offset so AccreteMass cell-crossing detection stays consistent across the
-    // wrap)
+    // Keep current and saved positions in the same periodic image for RK3.
     if (wrap) {
       Real s;
       s = Kokkos::floor((pr(IPX, p) - xmin)/Lx)*Lx;
@@ -737,7 +632,6 @@ TaskStatus Particles::SendP(Driver *pdrive, int stage) {
 
 TaskStatus Particles::RecvP(Driver *pdrive, int stage) {
   TaskStatus tstat = pbval_part->RecvAndUnpackPrtcls();
-  if (tstat == TaskStatus::complete) CheckSinkSanity("migration receive", stage);
   return tstat;
 }
 
@@ -767,13 +661,11 @@ TaskStatus Particles::ClearRecv(Driver *pdrive, int stage) {
 //! \brief Compute the particle timestep from end-of-cycle velocities: dtnew =
 //! cfl_par * min over particles of 1/sqrt((v1/dx1)^2+(v2/dx2)^2+(v3/dx3)^2), using each
 //! particle's own MeshBlock cell sizes (handles AMR levels automatically). Note
-//! Mesh::NewTimeStep applies NO cfl factor to ppart->dtnew, so the safety factor lives
-//! here; cfl_par=0.5 (default) guarantees at most one cell crossed per step, as the
-//! control-volume accretion's cell-crossing correction assumes.
+//! Mesh::NewTimeStep applies no CFL factor to ppart->dtnew, so cfl_par is applied here
+//! to resolve particle motion on the mesh cell-crossing timescale.
 
 TaskStatus Particles::NewTimeStep(Driver *pdriver, int stage) {
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;  // once per cycle
-  CheckSinkSanity("timestep", stage);
   dtnew = std::numeric_limits<Real>::max();
   if (nprtcl_thispack <= 0) return TaskStatus::complete;
 
