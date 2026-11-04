@@ -50,13 +50,7 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
   // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
   creation = pin->GetOrAddBoolean("particles","creation",true);
   creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", true);
-  const std::string convergence = pin->GetOrAddString(
-      "particles", "sink_convergence", "mass_flux");
-  if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {
-    std::cerr << "Unknown particles/sink_convergence: " << convergence << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  sink_convergence = convergence == "off" ? 0 : (convergence == "mass_flux" ? 1 : 2);
+  converging_flow = pin->GetOrAddBoolean("particles", "converging_flow", true);
 
   // particle CFL number (see particles.hpp); 0.5 guarantees <= 1 cell crossed per step
   cfl_par = pin->GetOrAddReal("particles","cfl_par",0.5);

@@ -117,9 +117,8 @@ class Particles {
   bool accretion;
   bool creation;
   bool creation_finest_only;
+  bool converging_flow;
   int created_total_ = 0;   // running count, for unique tags
-
-  int sink_convergence;  // 0: off; 1: directional mass flux; 2: velocity gradient
 
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;

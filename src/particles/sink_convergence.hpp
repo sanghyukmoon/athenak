@@ -6,16 +6,15 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file sink_convergence.hpp
-//! \brief converging-flow test for sink creation
+//! \brief converging-flow test for sink creation and accretion
 
 #include "athena.hpp"
 namespace particles {
-// Strict inflow on each pair of CV faces. Uniform face areas cancel within an axis.
+// Net mass inflow on each pair of CV faces. Uniform face areas cancel within an axis.
 // Use conserved variables so the check sees the same state as the proposed reset.
 template<class View>
 KOKKOS_INLINE_FUNCTION bool ConvergingFlow(const View &u, int m, int i, int j, int k,
-                                          Real vx, Real vy, Real vz, int mode) {
-  if (mode == 0) return true;
+                                          Real vx, Real vy, Real vz) {
   const Real vref[3] = {vx, vy, vz};
   for (int axis=0; axis<3; ++axis) {
     Real inflow = 0.0;
@@ -28,7 +27,7 @@ KOKKOS_INLINE_FUNCTION bool ConvergingFlow(const View &u, int m, int i, int j, i
       if (!(dl > 0.0 && dr > 0.0)) return false;
       const Real ml=u(m,IM1+axis,l[2],l[1],l[0]);
       const Real mr=u(m,IM1+axis,r[2],r[1],r[0]);
-      inflow += mode == 1 ? (ml-dl*vref[axis])-(mr-dr*vref[axis]) : ml/dl-mr/dr;
+      inflow += (ml-dl*vref[axis])-(mr-dr*vref[axis]);
     }
     if (!(inflow > 0.0)) return false;
   }

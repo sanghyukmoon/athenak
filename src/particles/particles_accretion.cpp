@@ -75,7 +75,7 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   const int nmb = pmy_pack->nmb_thispack;
   const int gids = pmy_pack->gids;
   const int nlocal = nprtcl_thispack;
-  const int mode = sink_convergence;
+  const bool check_converging_flow = converging_flow;
 
   // Logical locations are host data. Copy exact finest-grid block offsets once;
   // coarse blocks are excluded before these offsets are used in the kernel.
@@ -137,7 +137,8 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
     const int kc = ip_eff[2] - off(m,2) + indcs.ks;
 
     // Check converging flow condition
-    if (!ConvergingFlow(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p), gr(IPVZ,p), mode)) {
+    if (check_converging_flow &&
+        !ConvergingFlow(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p), gr(IPVZ,p))) {
       if (gr(IPM,p) == 0.0) {
         Kokkos::abort("Newly created sink failed to satisfy converging flow condition");
       }
