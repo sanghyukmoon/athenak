@@ -40,34 +40,6 @@
 
 namespace particles {
 
-namespace {
-// Return the block-local sink cell when its 27-cell CV overlaps active cells.
-// The caller selects finest-level blocks and supplies wrapped particle positions.
-KOKKOS_INLINE_FUNCTION
-bool SinkOverlapsMeshBlock(const RegionSize &msh_sz, const RegionIndcs &indcs,
-                          const int nx_eff[3], const int offset[3],
-                          const Real xp[3], bool periodic,
-                          int &ic, int &jc, int &kc) {
-  const int nx[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
-  const Real le[3] = {msh_sz.x1min, msh_sz.x2min, msh_sz.x3min};
-  const Real re[3] = {msh_sz.x1max, msh_sz.x2max, msh_sz.x3max};
-  int ip_eff[3];
-  for (int axis=0; axis<3; ++axis) {
-    ip_eff[axis] = CellCenterIndex(xp[axis], nx_eff[axis], le[axis], re[axis]);
-    if (periodic) {
-      if (ip_eff[axis] < offset[axis]-1) ip_eff[axis] += nx_eff[axis];
-      if (ip_eff[axis] > offset[axis]+nx[axis]) ip_eff[axis] -= nx_eff[axis];
-    }
-    if (ip_eff[axis] < offset[axis]-1 ||
-        ip_eff[axis] > offset[axis]+nx[axis]) return false;
-  }
-  ic = ip_eff[0]-offset[0]+indcs.is;
-  jc = ip_eff[1]-offset[1]+indcs.js;
-  kc = ip_eff[2]-offset[2]+indcs.ks;
-  return true;
-}
-}  // namespace
-
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus Particles::AccreteMass
 //! \brief accrete gas in the control volume onto each sink particle (last RK stage only).
@@ -119,6 +91,32 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
   mb_offset.template sync<DevExeSpace>();
   auto off = mb_offset.d_view;
 
+  // Return the block-local sink cell when its 27-cell CV overlaps active cells.
+  // The caller selects finest-level blocks and supplies wrapped particle positions.
+  const auto SinkOverlapsMeshBlock = KOKKOS_LAMBDA(const int m, const int p,
+      const bool periodic, int &ic, int &jc, int &kc) {
+    const int nx_eff[3] = {nx1_eff, nx2_eff, nx3_eff};
+    const int nx[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
+    const int offset[3] = {off(m,0), off(m,1), off(m,2)};
+    const Real xp[3] = {gr(IPX,p), gr(IPY,p), gr(IPZ,p)};
+    const Real le[3] = {msh_sz.x1min, msh_sz.x2min, msh_sz.x3min};
+    const Real re[3] = {msh_sz.x1max, msh_sz.x2max, msh_sz.x3max};
+    int ip_eff[3];
+    for (int axis=0; axis<3; ++axis) {
+      ip_eff[axis] = CellCenterIndex(xp[axis], nx_eff[axis], le[axis], re[axis]);
+      if (periodic) {
+        if (ip_eff[axis] < offset[axis]-1) ip_eff[axis] += nx_eff[axis];
+        if (ip_eff[axis] > offset[axis]+nx[axis]) ip_eff[axis] -= nx_eff[axis];
+      }
+      if (ip_eff[axis] < offset[axis]-1 ||
+          ip_eff[axis] > offset[axis]+nx[axis]) return false;
+    }
+    ic = ip_eff[0]-offset[0]+indcs.is;
+    jc = ip_eff[1]-offset[1]+indcs.js;
+    kc = ip_eff[2]-offset[2]+indcs.ks;
+    return true;
+  };
+
   constexpr int iaccept = 4;
   const int scr_level = 0;
   const size_t scr_bytes = ScrArray2D<Real>::shmem_size(4, 27)
@@ -132,15 +130,12 @@ TaskStatus Particles::AccreteMass(Driver *pdriver, int stage) {
     if (mb_lev(m) != max_level) return;
     const int nx_eff[3] = {nx1_eff, nx2_eff, nx3_eff};
     const int nx[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
-    const int offset[3] = {off(m,0), off(m,1), off(m,2)};
-    const Real xp[3] = {gr(IPX,p), gr(IPY,p), gr(IPZ,p)};
     int ic, jc, kc;
-    if (!SinkOverlapsMeshBlock(msh_sz, indcs, nx_eff, offset, xp, periodic,
-                              ic, jc, kc)) {
+    if (!SinkOverlapsMeshBlock(m, p, periodic, ic, jc, kc)) {
       return;
     }
-    const int ip_eff[3] = {ic-indcs.is+offset[0], jc-indcs.js+offset[1],
-                           kc-indcs.ks+offset[2]};
+    const int ip_eff[3] = {ic-indcs.is+off(m,0), jc-indcs.js+off(m,1),
+                           kc-indcs.ks+off(m,2)};
     if (!SinkConverging(u0, m, ic, jc, kc, gr(IPVX,p), gr(IPVY,p),
                         gr(IPVZ,p), convergence)) {
       if (gr(IPM,p) == 0.0) {
