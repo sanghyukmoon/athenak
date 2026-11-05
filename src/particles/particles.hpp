@@ -53,15 +53,22 @@ struct ParticlesTaskIDs {
   TaskID irecv;
   TaskID sendp;
   TaskID recvp;
-  TaskID csend;
   TaskID crecv;
-  // regrid-driven cross-rank particle migration chain (before_timeintegrator)
-  TaskID bt_count;
-  TaskID bt_irecv;
-  TaskID bt_sendp;
-  TaskID bt_recvp;
-  TaskID bt_csend;
-  TaskID bt_crecv;
+  TaskID csend;
+  // Post-accretion gas refresh.
+  TaskID gas_restu;
+  TaskID gas_restb;
+  TaskID gas_irecv;
+  TaskID gas_sendu;
+  TaskID gas_recvu;
+  TaskID gas_sendb;
+  TaskID gas_recvb;
+  TaskID gas_prol;
+  TaskID gas_bcs;
+  TaskID gas_c2p;
+  TaskID gas_newdt;
+  TaskID gas_csend;
+  TaskID gas_crecv;
   // gravitational-potential halo exchange, split into tasks like every other exchange
   TaskID xphi_irecv;
   TaskID xphi_rest;

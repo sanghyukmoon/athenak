@@ -44,11 +44,13 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     std::exit(EXIT_FAILURE);
   }
 
-  // control-volume gas accretion onto sinks: opt-in (accretion tests set it true);
-  // orbit/gravity tests with inert or no gas leave it off so the kernel never runs
-  accretion = pin->GetOrAddBoolean("particles","accretion",false);
-  // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
-  creation = pin->GetOrAddBoolean("particles","creation",true);
+  accretion = pin->GetOrAddBoolean("particles", "accretion", true);
+  creation = pin->GetOrAddBoolean("particles", "creation", true);
+  if (creation && !accretion) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "creation requires accretion = true" <<std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", true);
   converging_flow = pin->GetOrAddBoolean("particles", "converging_flow", true);
 

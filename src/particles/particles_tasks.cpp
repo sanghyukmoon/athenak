@@ -42,6 +42,16 @@ namespace particles {
 void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> tl) {
   TaskID none(0);
 
+  const auto SendRecvParticles = [this](TaskList &tasks, TaskID dependency) {
+    id.count = tasks.AddTask(&Particles::SendCnt, this, dependency);
+    id.irecv = tasks.AddTask(&Particles::InitRecv, this, id.count);
+    id.sendp = tasks.AddTask(&Particles::SendP, this, id.irecv);
+    id.recvp = tasks.AddTask(&Particles::RecvP, this, id.sendp);
+    id.crecv = tasks.AddTask(&Particles::ClearRecv, this, id.recvp);
+    id.csend = tasks.AddTask(&Particles::ClearSend, this, id.crecv);
+    return id.csend;
+  };
+
   if (pusher == ParticlesPusher::leapfrog || pusher == ParticlesPusher::rk3) {
     // Re-bin particles at the start of every cycle by recomputing PGID *absolutely* from
     // position. AthenaK's AMR regrid (end of the previous cycle) renumbers MeshBlocks but
@@ -58,18 +68,7 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     // them to their new rank BEFORE the deposit below reads particle mass. No-ops on a
     // single rank / when nothing crossed. (The per-step drift migration is the separate
     // chain in "stagen" after Push.)
-    id.bt_count = tl["before_timeintegrator"]->AddTask(&Particles::SendCnt, this,
-                                                       id.setgid);
-    id.bt_irecv = tl["before_timeintegrator"]->AddTask(&Particles::InitRecv, this,
-                                                       id.bt_count);
-    id.bt_sendp = tl["before_timeintegrator"]->AddTask(&Particles::SendP, this,
-                                                       id.bt_irecv);
-    id.bt_recvp = tl["before_timeintegrator"]->AddTask(&Particles::RecvP, this,
-                                                       id.bt_sendp);
-    id.bt_crecv = tl["before_timeintegrator"]->AddTask(&Particles::ClearRecv, this,
-                                                       id.bt_recvp);
-    id.bt_csend = tl["before_timeintegrator"]->AddTask(&Particles::ClearSend, this,
-                                                       id.bt_crecv);
+    id.csend = SendRecvParticles(*tl["before_timeintegrator"], id.setgid);
 
     // Self-gravitating (sink) particles are integrated WITHIN the time integrator
     // so they are stage-synchronized with the gravity solve and the gas, giving a
@@ -121,12 +120,7 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.newgid = tl["stagen"]->AddTask(&Particles::SetGIDFromPosition, this, id.push);
     // cross-rank particle migration (same chain as tracers, driven by the sendlist
     // populated in SetGIDFromPosition); no-ops on a single rank
-    id.count  = tl["stagen"]->AddTask(&Particles::SendCnt, this, id.newgid);
-    id.irecv  = tl["stagen"]->AddTask(&Particles::InitRecv, this, id.count);
-    id.sendp  = tl["stagen"]->AddTask(&Particles::SendP, this, id.irecv);
-    id.recvp  = tl["stagen"]->AddTask(&Particles::RecvP, this, id.sendp);
-    id.crecv  = tl["stagen"]->AddTask(&Particles::ClearRecv, this, id.recvp);
-    id.csend  = tl["stagen"]->AddTask(&Particles::ClearSend, this, id.crecv);
+    id.csend = SendRecvParticles(*tl["stagen"], id.newgid);
 
     // release the potential exchange's buffers once the stage is done with them
     id.xphi_csend = tl["after_stagen"]->AddTask(&Particles::XPhiClearSend, this, none);
@@ -145,84 +139,88 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     //   merge                       : combine overlapping/face-touching CVs, so
     //           AccreteMass never sees overlapping control volumes.
     //   accrete (<particles>/accretion): control-volume gas -> sink.
-    TaskID dep = none;
-    if (accretion && creation) {
-      id.create = tl["after_timeintegrator"]->AddTask(&Particles::CreateSinks, this, dep);
-      dep = id.create;
+    id.create = none;
+    if (creation) {
+      id.create = tl["after_timeintegrator"]->AddTask(&Particles::CreateSinks, this, none);
     }
-    id.merge = tl["after_timeintegrator"]->AddTask(&Particles::MergeSinks, this, dep);
-    dep = id.merge;
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::SendCnt, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::InitRecv, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::SendP, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::RecvP, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::ClearRecv, this, dep);
-    dep = tl["after_timeintegrator"]->AddTask(&Particles::ClearSend, this, dep);
+    id.gas_crecv = none;
     if (accretion) {
-      id.accrete = tl["after_timeintegrator"]->AddTask(&Particles::AccreteMass, this, dep);
-      dep = id.accrete;
+      id.merge = tl["after_timeintegrator"]->AddTask(&Particles::MergeSinks, this,
+                                                     id.create);
+      id.newgid = tl["after_timeintegrator"]->AddTask(&Particles::SetGIDFromPosition,
+                                                      this, id.merge);
+      id.csend = SendRecvParticles(*tl["after_timeintegrator"], id.newgid);
+      id.accrete = tl["after_timeintegrator"]->AddTask(&Particles::AccreteMass,
+                                                       this, id.csend);
       // The completed after_stagen list has cleared the ordinary gas exchange.
       // Stage -1 initializes/clears boundary communication without flux exchange.
       if (pmy_pack->phydro != nullptr) {
         auto *phydro = pmy_pack->phydro;
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RestrictU, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+        id.gas_restu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RestrictU,
+                                                           phydro, id.accrete);
+        id.gas_irecv = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
           return phydro->InitRecv(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::SendU, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RecvU, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::Prolongate, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ApplyPhysicalBCs,
-                                                phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ConToPrim, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::NewTimeStep, phydro, dep);
-        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+        }, id.gas_restu);
+        id.gas_sendu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::SendU,
+                                                           phydro, id.gas_irecv);
+        id.gas_recvu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RecvU,
+                                                           phydro, id.gas_sendu);
+        id.gas_prol = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::Prolongate,
+                                                          phydro, id.gas_recvu);
+        id.gas_bcs = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ApplyPhysicalBCs,
+                                                         phydro, id.gas_prol);
+        id.gas_c2p = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ConToPrim,
+                                                         phydro, id.gas_bcs);
+        id.gas_newdt = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::NewTimeStep,
+                                                           phydro, id.gas_c2p);
+        id.gas_csend = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
           return phydro->ClearSend(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+        }, id.gas_newdt);
+        id.gas_crecv = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
           return phydro->ClearRecv(d, -1);
-        }, dep);
+        }, id.gas_csend);
       }
       if (pmy_pack->pmhd != nullptr) {
         auto *pmhd = pmy_pack->pmhd;
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictU, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictB, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+        id.gas_restu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictU,
+                                                           pmhd, id.accrete);
+        id.gas_restb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictB,
+                                                           pmhd, id.gas_restu);
+        id.gas_irecv = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
           return pmhd->InitRecv(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendU, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvU, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendB, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvB, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::Prolongate, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ApplyPhysicalBCs, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ConToPrim, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask(&mhd::MHD::NewTimeStep, pmhd, dep);
-        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+        }, id.gas_restb);
+        id.gas_sendu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendU,
+                                                           pmhd, id.gas_irecv);
+        id.gas_recvu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvU,
+                                                           pmhd, id.gas_sendu);
+        id.gas_sendb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendB,
+                                                           pmhd, id.gas_recvu);
+        id.gas_recvb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvB,
+                                                           pmhd, id.gas_sendb);
+        id.gas_prol = tl["after_timeintegrator"]->AddTask(&mhd::MHD::Prolongate,
+                                                          pmhd, id.gas_recvb);
+        id.gas_bcs = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ApplyPhysicalBCs,
+                                                         pmhd, id.gas_prol);
+        id.gas_c2p = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ConToPrim,
+                                                         pmhd, id.gas_bcs);
+        id.gas_newdt = tl["after_timeintegrator"]->AddTask(&mhd::MHD::NewTimeStep,
+                                                           pmhd, id.gas_c2p);
+        id.gas_csend = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
           return pmhd->ClearSend(d, -1);
-        }, dep);
-        dep = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+        }, id.gas_newdt);
+        id.gas_crecv = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
           return pmhd->ClearRecv(d, -1);
-        }, dep);
+        }, id.gas_csend);
       }
     }
-    id.newdt = tl["after_timeintegrator"]->AddTask(&Particles::NewTimeStep, this, dep);
+    id.newdt = tl["after_timeintegrator"]->AddTask(&Particles::NewTimeStep,
+                                                   this, id.gas_crecv);
   } else {
     // Tracer / cosmic-ray (drift) particles: integrated once per cycle in the
     // "before_timeintegrator" task list (no gravity coupling).
     id.push   = tl["before_timeintegrator"]->AddTask(&Particles::Push, this, none);
     id.newgid = tl["before_timeintegrator"]->AddTask(&Particles::NewGID, this, id.push);
-    id.count  = tl["before_timeintegrator"]->AddTask(&Particles::SendCnt, this,
-                                                     id.newgid);
-    id.irecv  = tl["before_timeintegrator"]->AddTask(&Particles::InitRecv, this,
-                                                     id.count);
-    id.sendp  = tl["before_timeintegrator"]->AddTask(&Particles::SendP, this, id.irecv);
-    id.recvp  = tl["before_timeintegrator"]->AddTask(&Particles::RecvP, this, id.sendp);
-    id.crecv  = tl["before_timeintegrator"]->AddTask(&Particles::ClearRecv, this,
-                                                     id.recvp);
-    id.csend  = tl["before_timeintegrator"]->AddTask(&Particles::ClearSend, this,
-                                                     id.crecv);
+    id.csend = SendRecvParticles(*tl["before_timeintegrator"], id.newgid);
   }
 
   return;

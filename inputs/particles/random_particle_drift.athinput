@@ -43,6 +43,8 @@ ndiag      = 1         # cycles between diagostic output
 particle_type = cosmic_ray
 ppc    = 0.01
 pusher = drift
+creation = false
+accretion = false
 
 <problem>
 
