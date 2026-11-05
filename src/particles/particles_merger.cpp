@@ -52,10 +52,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   const int nranks = global_variable::nranks;
   const int my_rank = global_variable::my_rank;
 
-  auto &mbsize = pmy_pack->pmb->mb_size;
-  auto msz_h = mbsize.h_view;
-  const int gids = pmy_pack->gids;
-  const int nmb = pmy_pack->nmb_thispack;
   const bool per = pmy_pack->pmesh->strictly_periodic;
   auto &msz = pmy_pack->pmesh->mesh_size;
   const Real dlo[3] = {msz.x1min, msz.x2min, msz.x3min};
@@ -211,15 +207,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     hr(IPM,p)=s.M;
     // Keep previous-position state consistent with the moved survivor.
     hr(IPX0,p)=s.x;  hr(IPY0,p)=s.y;  hr(IPZ0,p)=s.z;
-    // re-derive the owning block from the COM (lower-inclusive). If the COM left this
-    // rank, keep the old PGID; the migration chain relocates the sink before accretion.
-    for (int mm = 0; mm < nmb; ++mm) {
-      if (s.x >= msz_h(mm).x1min && s.x < msz_h(mm).x1max &&
-          s.y >= msz_h(mm).x2min && s.y < msz_h(mm).x2max &&
-          s.z >= msz_h(mm).x3min && s.z < msz_h(mm).x3max) {
-        hi(PGID,p) = gids + mm; break;
-      }
-    }
+    // Ownership is refreshed by the following SetGIDFromPosition task.
   }
 
   // ---- compact out absorbed slots (order-preserving) ----
