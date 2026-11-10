@@ -187,7 +187,7 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     auto &e32 = e3x2;
 
     auto aL = aL_x2f; auto dL = dL_x2f; auto dR = dR_x2f;
-    auto vt1 = vx_x2f; auto vt2 = vz_x2f;
+    auto vt1 = vz_x2f; auto vt2 = vx_x2f;  // cyclic HLLD tangential order
 
     int kl = ks, ku = ke;
     if (pmy_pack->pmesh->three_d) { kl = ks-ext; ku = ke+ext; }
