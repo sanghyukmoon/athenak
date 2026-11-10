@@ -101,6 +101,22 @@ def read_restart(path):
                 spacing=size[6:9], shape=(nx, ny, nz), params=params, raw=raw, density_byte=density_byte)
 
 
+def read_terminal(directory, expected_cycle=None):
+    """Accept the donor's numbered terminal restart without changing its writer."""
+    directory = Path(directory)
+    final_path = directory/"uct.final.rst"
+    if final_path.exists():
+        final = read_restart(final_path)
+    else:
+        candidates = sorted(directory.glob("uct.[0-9][0-9][0-9][0-9][0-9].rst"))
+        assert candidates, "No restart checkpoints were written"
+        final = max((read_restart(path) for path in candidates),
+                    key=lambda state: (state["cycle"], state["time"]))
+    if expected_cycle is not None and expected_cycle >= 0:
+        assert final["cycle"] == expected_cycle, "Terminal checkpoint cycle mismatch"
+    return final
+
+
 def compare(left, right, require_epoch=True):
     """Compare every conserved component and every physical staggered face."""
     if require_epoch:
@@ -185,7 +201,7 @@ def run_case(binary, input_file, directory, overrides=None, launcher=None, succe
     if success:
         assert result.returncode == 0, result.stdout[-6000:]
         initial = read_restart(directory/"rst/uct.00000.rst")
-        final = read_restart(directory/"rst/uct.final.rst")
+        final = read_terminal(directory/"rst", int((overrides or {}).get("time/nlim", -1)))
         check_divergence(initial)
         check_divergence(final)
         return initial, final
