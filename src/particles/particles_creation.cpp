@@ -138,20 +138,10 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
     scan(nnew);
   }
 
-  // ---- globally unique tags ------------------------------------------------------
-  // PTAG must be unique across the WHOLE run, not just this rank: the merger gathers
-  // every sink and keys survivors/absorbed by tag, so two distinct sinks sharing a tag
-  // are taken for one object. `created_total_` alone is rank-local, so on N ranks the
-  // first sink created on each rank got tag 1000000 -- the merger then "merged" two
-  // physically separate sinks (mirror images of an m=2 pair, nowhere near each other),
-  // summed their masses, and every rank wrote the sum back onto its own copy, doubling
-  // the sink mass EVERY cycle (observed: 9.8 -> 1e72 over ~230 cycles).
-  // Fix: number this step's new sinks from a global base. Each rank takes the block
-  // [1 + created_total_ + offset, ... + nnew), where offset is the exclusive prefix sum of
-  // nnew over lower ranks, and every rank then advances created_total_ by the GLOBAL
-  // total so the counters never drift apart and no later step can collide either.
-  // The collective is unconditional -- it must be reached even by ranks creating
-  // nothing, hence no early return above (the nnew <= 0 exit is below it).
+  // Provisional tags must be unique across ranks because the merger keys its results
+  // by tag. Number candidates above the permanent-ID counter, using each rank's offset.
+  // MergeSinks advances the counter only for surviving newborns and assigns their final
+  // IDs. Every rank must reach this collective, including ranks creating no candidates.
   int tag_offset = 0, ncreated_global = nnew;
 #if MPI_PARALLEL_ENABLED
   if (global_variable::nranks > 1) {
@@ -164,7 +154,6 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
   }
 #endif
   const int tag0 = 1 + created_total_ + tag_offset;
-  created_total_ += ncreated_global;
 
   if (nnew <= 0) {
     // This rank created nothing, but another rank may have: RefreshMeshParticleCounts is
@@ -190,12 +179,8 @@ TaskStatus Particles::CreateSinks(Driver *pdriver, int stage) {
     const Real x = msz_h(m).x1min + (static_cast<Real>(i-is) + 0.5)*msz_h(m).dx1;
     const Real y = msz_h(m).x2min + (static_cast<Real>(j-js) + 0.5)*msz_h(m).dx2;
     const Real z = msz_h(m).x3min + (static_cast<Real>(k-ks) + 0.5)*msz_h(m).dx3;
-    // Print on the CREATING rank, and report the global TAG rather than a local slot
-    // index: rank-0-only prints hide every sink born on another rank, and the tag is what
-    // the merger and the history output key on (a duplicated tag is a real bug -- see the
-    // tag-numbering comment above).
-    std::printf("CreateSinks: new sink tag=%d on rank %d at (%.5f, %.5f, %.5f) "
-                "cycle=%d\n",
+    std::printf("CreateSinks: candidate provisional_tag=%d on rank %d at "
+                "(%.5f, %.5f, %.5f) cycle=%d\n",
                 tag0 + n, global_variable::my_rank, x, y, z,
                 pmy_pack->pmesh->ncycle);
   }

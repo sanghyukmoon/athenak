@@ -51,6 +51,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 
   const int nranks = global_variable::nranks;
   const int my_rank = global_variable::my_rank;
+  const int old_max_tag = created_total_;
 
   const bool per = pmy_pack->pmesh->strictly_periodic;
   auto &msz = pmy_pack->pmesh->mesh_size;
@@ -128,6 +129,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   struct Surv { Real x, y, z, vx, vy, vz, M; };
   std::map<int, Surv> survmap;
   std::set<int> absorbed;
+  std::vector<int> new_tags;
   std::vector<SinkMergeRecord<Real>> sinks;
   for (int i=0; i<Ntot; ++i) {
     const Real *r=&G[static_cast<size_t>(i)*REC];
@@ -145,10 +147,20 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   for (const auto &s : sinks) {
     if (!s.alive) {
       absorbed.insert(s.tag);
-    } else if (s.changed) {
-      survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
+    } else {
+      if (s.mass == 0.0) new_tags.push_back(s.tag);
+      if (s.changed) {
+        survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
+      }
     }
   }
+  // Keep original tags as lookup keys; only destination arrays receive permanent IDs.
+  const auto FinalTag = [&](int tag) {
+    const auto it = std::lower_bound(new_tags.begin(), new_tags.end(), tag);
+    if (it == new_tags.end() || *it != tag) return tag;
+    return old_max_tag + 1 + static_cast<int>(it - new_tags.begin());
+  };
+  created_total_ = old_max_tag + static_cast<int>(new_tags.size());
   // Publish even an empty, single-particle or unchanged survivor list. Migration may
   // reorder local particles afterward; this snapshot stays immutable through accretion.
   if (accretion) {
@@ -162,7 +174,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
       if (!s.alive) continue;
       gr(IPX,p)=s.x[0];   gr(IPY,p)=s.x[1];   gr(IPZ,p)=s.x[2];
       gr(IPVX,p)=s.v[0];  gr(IPVY,p)=s.v[1];  gr(IPVZ,p)=s.v[2];
-      gr(IPM,p)=s.mass;   gt(p)=s.tag;
+      gr(IPM,p)=s.mass;   gt(p)=FinalTag(s.tag);
       ++p;
     }
     Kokkos::deep_copy(global_prtcl_rdata, gr);
@@ -225,6 +237,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     const int src = keep[n];
     for (int v = 0; v < nrdata; ++v) hr2(v, n) = hr(v, src);
     for (int v = 0; v < nidata; ++v) hi2(v, n) = hi(v, src);
+    hi2(PTAG, n) = FinalTag(hi(PTAG, src));
   }
   Kokkos::deep_copy(prtcl_rdata, hr2);
   Kokkos::deep_copy(prtcl_idata, hi2);

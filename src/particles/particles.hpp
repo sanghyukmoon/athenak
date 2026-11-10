@@ -125,7 +125,7 @@ class Particles {
   bool creation;
   bool creation_finest_only;
   bool converging_flow;
-  int created_total_ = 0;   // running count, for unique tags
+  int created_total_ = 0;   // permanent-ID high-water mark, retained across restarts
 
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;
