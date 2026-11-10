@@ -27,6 +27,7 @@
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
 #include "particles.hpp"
+#include "outputs/outputs.hpp"
 #include "sink_particles.hpp"
 #include "coordinates/cell_locations.hpp"
 
@@ -57,8 +58,13 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   auto &msz = pmy_pack->pmesh->mesh_size;
   const Real dlo[3] = {msz.x1min, msz.x2min, msz.x3min};
 
-  auto refresh_return = [&]() {
+  auto finish = [&](const HostArray2D<Real> &rdata, const HostArray2D<int> &idata) {
     RefreshMeshParticleCounts();
+    if (phistory != nullptr) {
+      auto *pm = pmy_pack->pmesh;
+      // Massless survivors have final IDs and positions, before first accretion.
+      phistory->WriteParticles(rdata, idata, pm->time + pm->dt, pm->ncycle + 1, true);
+    }
     return TaskStatus::complete;
   };
 
@@ -180,7 +186,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     Kokkos::deep_copy(global_prtcl_rdata, gr);
     Kokkos::deep_copy(global_prtcl_tags, gt);
   }
-  if (absorbed.empty()) return refresh_return();
+  if (absorbed.empty()) return finish(hr, hi);
   if (my_rank==0) std::printf("MergeSinks: iterative removed %zu sinks cycle=%d\n",
                               absorbed.size(),pmy_pack->pmesh->ncycle);
 
@@ -283,7 +289,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
       }
     }
   }
-  return refresh_return();
+  return finish(hr2, hi2);
 }
 
 }  // namespace particles

@@ -29,20 +29,15 @@ ParticleHistoryOutput::ParticleHistoryOutput(ParameterInput *pin, Mesh *pm,
   pp->phistory = this;
 }
 
-void ParticleHistoryOutput::WriteParticles(Mesh *pm, int first, int count,
-                                           Real time, int cycle) {
-  if (count == 0) return;
-  auto *pp = pm->pmb_pack->ppart;
-  auto range = std::make_pair(first, first + count);
-  auto ids = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
-      Kokkos::subview(pp->prtcl_idata, static_cast<int>(PTAG), range));
-  // Copy before selecting particles: a partial real-state slice is noncontiguous.
-  auto state = Kokkos::create_mirror_view_and_copy(HostMemSpace(), pp->prtcl_rdata);
+void ParticleHistoryOutput::WriteParticles(const HostArray2D<Real> &rdata,
+                                           const HostArray2D<int> &idata,
+                                           Real time, int cycle, bool newborn_only) {
   const int fields[7] = {IPM, IPX, IPY, IPZ, IPVX, IPVY, IPVZ};
   const int precision = std::numeric_limits<Real>::max_digits10;
-  for (int p=0; p<count; ++p) {
+  for (int p=0; p<rdata.extent_int(1); ++p) {
+    if (newborn_only && rdata(IPM,p) != 0.0) continue;
     std::string fname = "parhst/" + out_params.file_basename + ".par" +
-                        std::to_string(ids(p)) + ".csv";
+                        std::to_string(idata(PTAG,p)) + ".csv";
     FILE *file = std::fopen(fname.c_str(), "a");
     if (file == nullptr) {
       std::cout << "### FATAL ERROR: could not open " << fname << std::endl;
@@ -52,9 +47,10 @@ void ParticleHistoryOutput::WriteParticles(Mesh *pm, int first, int count,
     if (std::ftell(file) == 0) {
       std::fprintf(file, "time,cycle,pid,mass,x1,x2,x3,v1,v2,v3\n");
     }
-    std::fprintf(file, "%.*g,%d,%d", precision, static_cast<double>(time), cycle, ids(p));
+    std::fprintf(file, "%.*g,%d,%d", precision, static_cast<double>(time), cycle,
+                  idata(PTAG,p));
     for (int v=0; v<7; ++v) {
-      std::fprintf(file, ",%.*g", precision, static_cast<double>(state(fields[v], first + p)));
+      std::fprintf(file, ",%.*g", precision, static_cast<double>(rdata(fields[v],p)));
     }
     std::fprintf(file, "\n");
     std::fclose(file);
@@ -62,7 +58,11 @@ void ParticleHistoryOutput::WriteParticles(Mesh *pm, int first, int count,
 }
 
 void ParticleHistoryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
-  WriteParticles(pm, 0, pm->pmb_pack->ppart->nprtcl_thispack, pm->time, pm->ncycle);
+  auto *pp = pm->pmb_pack->ppart;
+  // Copy complete arrays: a partial real-state slice is noncontiguous.
+  auto rdata = Kokkos::create_mirror_view_and_copy(HostMemSpace(), pp->prtcl_rdata);
+  auto idata = Kokkos::create_mirror_view_and_copy(HostMemSpace(), pp->prtcl_idata);
+  WriteParticles(rdata, idata, pm->time, pm->ncycle);
   out_params.file_number++;
   out_params.last_time = out_params.last_time < 0.0 ? pm->time :
                         out_params.last_time + out_params.dt;

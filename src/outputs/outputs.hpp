@@ -421,7 +421,8 @@ class ParticleHistoryOutput : public BaseTypeOutput {
   ParticleHistoryOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
   void LoadOutputData(Mesh *pm) override {}
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
-  void WriteParticles(Mesh *pm, int first, int count, Real time, int cycle);
+  void WriteParticles(const HostArray2D<Real> &rdata, const HostArray2D<int> &idata,
+                      Real time, int cycle, bool newborn_only = false);
 };
 
 //! \brief Full-domain projections along all three Cartesian axes.
