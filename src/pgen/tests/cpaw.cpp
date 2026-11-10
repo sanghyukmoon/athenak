@@ -465,7 +465,8 @@ void AlfvenWaveErrors(ParameterInput *pin, Mesh *pm) {
 
   // compute errors for MHD  -------------------------------------------------------------
   if (pmbp->pmhd != nullptr) {
-    nvars = pmbp->pmhd->nmhd + 3;  // include 3-compts of cell-centered B in errors
+    const int nmhd = pmbp->pmhd->nmhd;
+    nvars = nmhd + 3;  // conserved variables followed by all three magnetic components
 
     EOS_Data &eos = pmbp->pmhd->peos->eos_data;
     auto &u0_ = pmbp->pmhd->u0;
@@ -507,18 +508,18 @@ void AlfvenWaveErrors(ParameterInput *pin, Mesh *pm) {
       // cell-centered B
       Real bcc0 = 0.5*(b0_.x1f(m,k,j,i) + b0_.x1f(m,k,j,i+1));
       Real bcc1 = 0.5*(b1_.x1f(m,k,j,i) + b1_.x1f(m,k,j,i+1));
-      evars.the_array[IEN+1] = vol*fabs(bcc0 - bcc1);
-      max_err = fmax(max_err, evars.the_array[IEN+1]);
+      evars.the_array[nmhd+0] = vol*fabs(bcc0 - bcc1);
+      max_err = fmax(max_err, evars.the_array[nmhd+0]);
 
       bcc0 = 0.5*(b0_.x2f(m,k,j,i) + b0_.x2f(m,k,j+1,i));
       bcc1 = 0.5*(b1_.x2f(m,k,j,i) + b1_.x2f(m,k,j+1,i));
-      evars.the_array[IEN+2] = vol*fabs(bcc0 - bcc1);
-      max_err = fmax(max_err, evars.the_array[IEN+2]);
+      evars.the_array[nmhd+1] = vol*fabs(bcc0 - bcc1);
+      max_err = fmax(max_err, evars.the_array[nmhd+1]);
 
       bcc0 = 0.5*(b0_.x3f(m,k,j,i) + b0_.x3f(m,k+1,j,i));
       bcc1 = 0.5*(b1_.x3f(m,k,j,i) + b1_.x3f(m,k+1,j,i));
-      evars.the_array[IEN+3] = vol*fabs(bcc0 - bcc1);
-      max_err = fmax(max_err, evars.the_array[IEN+3]);
+      evars.the_array[nmhd+2] = vol*fabs(bcc0 - bcc1);
+      max_err = fmax(max_err, evars.the_array[nmhd+2]);
 
       // fill rest of the_array with zeros, if narray < NREDUCTION_VARIABLES
       for (int n=nvars; n<NREDUCTION_VARIABLES; ++n) {
@@ -577,7 +578,10 @@ void AlfvenWaveErrors(ParameterInput *pin, Mesh *pm) {
         std::exit(EXIT_FAILURE);
       }
       std::fprintf(pfile, "# Nx1  Nx2  Nx3   Ncycle  RMS-L1    L-infty       ");
-      std::fprintf(pfile,"d_L1         M1_L1         M2_L1         M3_L1         E_L1");
+      std::fprintf(pfile,"d_L1         M1_L1         M2_L1         M3_L1");
+      if (pmbp->pmhd->peos->eos_data.is_ideal) {
+        std::fprintf(pfile,"         E_L1");
+      }
       if (pmbp->pmhd != nullptr) {
         std::fprintf(pfile,"          B1_L1         B2_L1         B3_L1");
       }
