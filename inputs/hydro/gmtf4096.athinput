@@ -6,29 +6,29 @@ basename  = GMTF       # problem ID: basename of output filenames
 
 <output1>
 file_type   = hst
-dt          = 0.0001
+dt          = 0.000025
 
 <output2>
 file_type   = bin
 variable    = hydro_u
-dt          = 0.2
+dt          = 0.1
 
 <output3>
 file_type   = proj
-dt          = 0.002
+dt          = 0.00025
 
 <output4>
 file_type   = rprof
 rmax        = 0.5
-dt          = 0.0005
+dt          = 0.000125
 
 <output5>
 file_type   = parbin
-dt          = 0.0005
+dt          = 0.000125
 
 <output6>
 file_type   = parhst
-dt          = 0.0005
+dt          = 0.000125
 
 <output7>
 file_type   = rst
@@ -36,23 +36,23 @@ dt          = 999
 
 <output8>
 file_type   = log
-dt          = 0.0001
+dt          = 0.000025
 
 <mesh>
 nghost    = 3         # Number of ghost cells
-nx1       = 1024       # Number of zones in X1-direction
+nx1       = 4096       # Number of zones in X1-direction
 x1min     = -2.0      # minimum value of X1
 x1max     = 2.0       # maximum value of X1
 ix1_bc    = periodic  # Inner-X1 boundary condition flag
 ox1_bc    = periodic  # Outer-X1 boundary condition flag
 
-nx2       = 1024       # Number of zones in X2-direction
+nx2       = 4096       # Number of zones in X2-direction
 x2min     = -2.0      # minimum value of X2
 x2max     = 2.0       # maximum value of X2
 ix2_bc    = periodic  # Inner-X2 boundary condition flag
 ox2_bc    = periodic  # Outer-X2 boundary condition flag
 
-nx3       = 1024       # Number of zones in X3-direction
+nx3       = 4096       # Number of zones in X3-direction
 x3min     = -2.0      # minimum value of X3
 x3max     = 2.0       # maximum value of X3
 ix3_bc    = periodic  # Inner-X3 boundary condition flag
@@ -95,7 +95,6 @@ creation            = true
 
 <problem>
 Mach       = 10       # 3D Mach number of initial turbulence
-mu_phi     = 2
 sfe_term   = 0.15     # Terminal SFE to stop the simulation.
 rseed      = 0
 nlow       = 0
