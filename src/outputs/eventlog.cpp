@@ -6,7 +6,7 @@
 //! \file eventlog.cpp
 //! \brief writes diagnostic data collected by various event counters implemented
 //! throughout the code to a log file.  Checks whether there is data to be written
-//! every time step, but only writes data if one or more counters are non-zero
+//! at the configured cadence, but only writes data if counters are non-zero
 
 #include <cstdio>
 #include <cstdlib>
@@ -52,16 +52,13 @@ void EventLogOutput::LoadOutputData(Mesh *pm) {
 #endif
 
   // check if there is any data to be written
-  no_output = true;
-  if (pm->ecounter.neos_dfloor > 0 ||
-      pm->ecounter.neos_efloor > 0 ||
-      pm->ecounter.neos_tfloor > 0 ||
-      pm->ecounter.neos_vceil  > 0 ||
-      pm->ecounter.neos_fail   > 0 ||
-      pm->ecounter.nfofc > 0 ||
-      pm->ecounter.maxit_c2p > 0) {
-    no_output=false;
-  }
+  has_events = pm->ecounter.neos_dfloor > 0 ||
+               pm->ecounter.neos_efloor > 0 ||
+               pm->ecounter.neos_tfloor > 0 ||
+               pm->ecounter.neos_vceil  > 0 ||
+               pm->ecounter.neos_fail   > 0 ||
+               pm->ecounter.nfofc > 0 ||
+               pm->ecounter.maxit_c2p > 0;
 }
 
 //----------------------------------------------------------------------------------------
@@ -69,10 +66,9 @@ void EventLogOutput::LoadOutputData(Mesh *pm) {
 //! \brief writes event counter data to log file
 
 void EventLogOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
-  if (header_written && no_output) return;
-
-  // only the master rank writes the file
-  if (global_variable::my_rank == 0) {
+  // Only the master writes the header or nonempty records. All ranks must still
+  // reset counters and advance the output time, including intervals with no events.
+  if (global_variable::my_rank == 0 && (!header_written || has_events)) {
     // create filename: "file_basename" + ".log"
     // There is no file number or id in event log output filenames.
     std::string fname;
@@ -97,7 +93,7 @@ void EventLogOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     }
 
     // write event counters
-    if (!(no_output)) {
+    if (has_events) {
       std::fprintf(pfile, "%8d", pm->ncycle);
       std::fprintf(pfile, " %8d", pm->ecounter.neos_dfloor);
       std::fprintf(pfile, " %8d", pm->ecounter.neos_efloor);
