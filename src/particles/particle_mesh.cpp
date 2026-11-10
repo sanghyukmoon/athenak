@@ -768,8 +768,7 @@ TaskStatus ParticleMesh::RefreshGhostsClearRecv() {
 //! folded by the device loop). Level jumps are converted on the SENDER so the wire
 //! format stays (dest cell, value): fine->coarse adds rho*dV_s/dV_d to the containing
 //! coarse cell; coarse->fine splits the mass uniformly over the covered fine cells --
-//! the same rules as the on-rank flush. Mirrors Particles::ExchangeCVReset (add, not
-//! overwrite; density only).
+//! the same rules as the on-rank flush (add, density only).
 
 void ParticleMesh::ExchangeDepositFlush() {
 #if MPI_PARALLEL_ENABLED

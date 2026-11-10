@@ -44,22 +44,15 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     std::exit(EXIT_FAILURE);
   }
 
-  // control-volume gas accretion onto sinks: opt-in (accretion tests set it true);
-  // orbit/gravity tests with inert or no gas leave it off so the kernel never runs
-  accretion = pin->GetOrAddBoolean("particles","accretion",false);
-  // sink creation (LP threshold + potential minimum; see particles_creation.cpp)
-  creation = pin->GetOrAddBoolean("particles","creation",true);
-  creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", false);
-  sanity_vmax = pin->GetOrAddReal("particles", "sanity_vmax", 0.0);
-  sanity_flag_ = DvceArray1D<int>("sanity_flag", 1);
-  sanity_rec_ = DvceArray1D<Real>("sanity_rec", kSanityRec);
-  const std::string convergence = pin->GetOrAddString(
-      "particles", "sink_convergence", "mass_flux");
-  if (convergence != "off" && convergence != "mass_flux" && convergence != "velocity") {
-    std::cerr << "Unknown particles/sink_convergence: " << convergence << std::endl;
+  accretion = pin->GetOrAddBoolean("particles", "accretion", true);
+  creation = pin->GetOrAddBoolean("particles", "creation", true);
+  if (creation && !accretion) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "creation requires accretion = true" <<std::endl;
     std::exit(EXIT_FAILURE);
   }
-  sink_convergence = convergence == "off" ? 0 : (convergence == "mass_flux" ? 1 : 2);
+  creation_finest_only = pin->GetOrAddBoolean("particles", "creation_finest_only", true);
+  converging_flow = pin->GetOrAddBoolean("particles", "converging_flow", true);
 
   // particle CFL number (see particles.hpp); 0.5 guarantees <= 1 cell crossed per step
   cfl_par = pin->GetOrAddReal("particles","cfl_par",0.5);
@@ -87,6 +80,12 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
                 << std::endl;
       std::exit(EXIT_FAILURE);
     }
+  }
+
+  if (particle_type == ParticleType::sink && accretion && indcs.ng < 3) {
+    std::cout << "### FATAL ERROR: sink accretion requires at least three ghost layers"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
   }
 
   // select pusher algorithm
@@ -161,18 +160,6 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     pbval_phi->InitializeBuffers(1);
   }
 
-  // Staging buffer + communicator for the cross-rank control-volume reset (MPI).
-  // Capacity covers each sink's 27 reset cells; overflow is guarded + warned in the kernel.
-  if (particle_type == ParticleType::sink && accretion) {
-    cvemit_max_ = std::max(1, nprtcl_thispack)*64;
-    Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
-    Kokkos::realloc(cvemit_cnt_, 1);
-    Kokkos::realloc(accskip_, 1);
-#if MPI_PARALLEL_ENABLED
-    MPI_Comm_dup(MPI_COMM_WORLD, &mpi_comm_cvscat_);
-#endif
-  }
-
   // allocate boundary object
   pbval_part = new ParticlesBoundaryValues(this, pin);
 }
@@ -237,8 +224,7 @@ void Particles::StEnd(int id, double t0) {
 void Particles::ReportSinkTimers(double wall_seconds) {
   if (st_mode_ <= 0) return;
   const int n = ST_NUM;
-  const char *name[ST_NUM] = {"colour(host+mirror)", "cv_reset(total)",
-                              "  MPI_Alltoall", "create_sinks", "merge_sinks",
+  const char *name[ST_NUM] = {"create_sinks", "merge_sinks",
                               "refresh_counts"};
   double tmax[ST_NUM], tsum[ST_NUM], wmax[ST_NUM];
   std::int64_t csum[ST_NUM];
@@ -259,8 +245,8 @@ void Particles::ReportSinkTimers(double wall_seconds) {
   std::printf("\n### SINK TIMERS  mode=%d  ranks=%d  wall=%.4f s"
               "  (host/MPI regions only -- device kernels are kokkos-tools' job)\n",
               st_mode_, nr, wall_seconds);
-  std::printf("###   ST_ALLTOALL is nested in ST_CVRESET, and refresh_counts in "
-              "create/merge: totals are INCLUSIVE, do not sum the column.\n");
+  std::printf("###   refresh_counts is nested in create/merge: totals are INCLUSIVE, "
+              "do not sum the column.\n");
   std::printf("### %-20s %10s %12s %12s %12s %8s\n",
               "region", "calls", "max_s", "mean_s", "wait_max_s", "%wall");
   for (int i = 0; i < n; ++i) {
@@ -274,28 +260,12 @@ void Particles::ReportSinkTimers(double wall_seconds) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Particles::ResizeParticles(int npart_new)
-//! \brief Resize the particle arrays to npart_new, grow the buffers that were sized from
-//! the ppc-derived count, and refresh the Mesh's global particle bookkeeping.
-//!
-//! The constructor sizes cvemit_ (the cross-rank control-volume reset staging buffer) as
-//! max(1, nprtcl_thispack)*64 records, from the count ppc implied BEFORE the pgen runs. A
-//! restart or IC that restores/seeds sinks typically runs with ppc = 0, so that
-//! buffer would hold 64 records total no matter how many sinks are seeded. Grow it here,
-//! so the caller only has to state how many particles it needs.
+//! \brief Resize the particle arrays and refresh global particle bookkeeping.
 
 void Particles::ResizeParticles(int npart_new) {
   Kokkos::resize(prtcl_rdata, nrdata, npart_new);
   Kokkos::resize(prtcl_idata, nidata, npart_new);
   nprtcl_thispack = npart_new;
-
-  // grow-only: never shrink below what a previous sizing already allocated
-  if (particle_type == ParticleType::sink && accretion) {
-    const int need = std::max(1, npart_new)*64;
-    if (need > cvemit_max_) {
-      cvemit_max_ = need;
-      Kokkos::realloc(cvemit_, cvemit_max_, NCVEMIT);
-    }
-  }
 
   RefreshMeshParticleCounts();
 }
@@ -352,64 +322,6 @@ void Particles::CreateParticleTags(ParameterInput *pin) {
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn void Particles::CheckSinkSanity
-//! \brief Abort with a full report on the first non-finite or absurd sink (see the
-//! sanity_vmax comment in particles.hpp). WHERE names the step that just ran; together
-//! with the clean check after the previous step it brackets the update that broke it.
-
-void Particles::CheckSinkSanity(const char *where, int stage) {
-  if (sanity_vmax <= 0.0 || particle_type != ParticleType::sink) return;
-  auto &pr = prtcl_rdata;
-  const Real vmax2 = sanity_vmax*sanity_vmax;
-  int nbad = 0;
-  if (nprtcl_thispack > 0) {
-    Kokkos::parallel_reduce("sink_sanity", Kokkos::RangePolicy<>(DevExeSpace(), 0,
-                            nprtcl_thispack),
-    KOKKOS_LAMBDA(const int p, int &n) {
-      const Real v2 = pr(IPVX, p)*pr(IPVX, p) + pr(IPVY, p)*pr(IPVY, p)
-                    + pr(IPVZ, p)*pr(IPVZ, p);
-      const Real s = pr(IPX, p) + pr(IPY, p) + pr(IPZ, p) + pr(IPM, p);
-      // written so that a NaN fails every comparison
-      if (!(v2 <= vmax2) || !(Kokkos::fabs(s) < 1.0e300) || !(pr(IPM, p) >= 0.0)) n += 1;
-    }, Kokkos::Sum<int>(nbad));
-  }
-  auto flag_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), sanity_flag_);
-  if (nbad == 0 && flag_h(0) == 0) return;
-
-  auto hr = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_rdata);
-  auto hi = Kokkos::create_mirror_view_and_copy(HostMemSpace(), prtcl_idata);
-  auto rec = Kokkos::create_mirror_view_and_copy(HostMemSpace(), sanity_rec_);
-  auto *pm = pmy_pack->pmesh;
-  std::printf("### SINK SANITY: %d bad sink(s) after %s (stage %d) on rank %d, cycle=%d "
-              "time=%.17e dt=%.17e, %d local sink(s), sanity_vmax=%g\n", nbad, where,
-              stage, global_variable::my_rank, pm->ncycle, pm->time, pm->dt,
-              nprtcl_thispack, sanity_vmax);
-  if (flag_h(0) == 1) {
-    std::printf("### SINK SANITY: push produced it: tag=%.0f v_old=(%.17e, %.17e, %.17e) "
-                "g=(%.17e, %.17e, %.17e) half_dt=%.17e v_new=(%.17e, %.17e, %.17e) "
-                "x=(%.17e, %.17e, %.17e) m=%.17e\n", rec(0), rec(1), rec(2), rec(3),
-                rec(4), rec(5), rec(6), rec(7), rec(8), rec(9), rec(10), rec(11), rec(12),
-                rec(13), rec(14));
-  } else if (flag_h(0) == 2) {
-    std::printf("### SINK SANITY: accretion produced it: tag=%.0f m_old=%.17e dm=%.17e "
-                "dp=(%.17e, %.17e, %.17e) v_old=(%.17e, %.17e, %.17e) "
-                "v_new=(%.17e, %.17e, %.17e) x=(%.17e, %.17e, %.17e)\n", rec(0), rec(1),
-                rec(2), rec(3), rec(4), rec(5), rec(6), rec(7), rec(8), rec(9), rec(10),
-                rec(11), rec(12), rec(13), rec(14));
-  }
-  for (int p = 0; p < nprtcl_thispack; ++p) {
-    std::printf("### SINK SANITY:   p=%d tag=%d gid=%d", p, hi(PTAG, p), hi(PGID, p));
-    for (int r = 0; r < nrdata; ++r) std::printf(" r%d=%.17e", r, hr(r, p));
-    std::printf("\n");
-  }
-  std::fflush(stdout);
-#if MPI_PARALLEL_ENABLED
-  MPI_Abort(MPI_COMM_WORLD, 86);
-#endif
-  std::exit(EXIT_FAILURE);
 }
 
 } // namespace particles

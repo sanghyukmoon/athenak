@@ -7,6 +7,7 @@
 //! \brief functions that control Particles tasks stored in tasklists in MeshBlockPack
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -26,6 +27,9 @@
 #include "coordinates/cell_locations.hpp"
 #include "bvals/bvals.hpp"
 #include "gravity/gravity.hpp"
+#include "driver/driver.hpp"
+#include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
 #include "particles.hpp"
 #include "particle_mesh.hpp"
 
@@ -37,6 +41,16 @@ namespace particles {
 
 void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> tl) {
   TaskID none(0);
+
+  const auto SendRecvParticles = [this](TaskList &tasks, TaskID dependency) {
+    id.count = tasks.AddTask(&Particles::SendCnt, this, dependency);
+    id.irecv = tasks.AddTask(&Particles::InitRecv, this, id.count);
+    id.sendp = tasks.AddTask(&Particles::SendP, this, id.irecv);
+    id.recvp = tasks.AddTask(&Particles::RecvP, this, id.sendp);
+    id.crecv = tasks.AddTask(&Particles::ClearRecv, this, id.recvp);
+    id.csend = tasks.AddTask(&Particles::ClearSend, this, id.crecv);
+    return id.csend;
+  };
 
   if (pusher == ParticlesPusher::leapfrog || pusher == ParticlesPusher::rk3) {
     // Re-bin particles at the start of every cycle by recomputing PGID *absolutely* from
@@ -54,18 +68,7 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     // them to their new rank BEFORE the deposit below reads particle mass. No-ops on a
     // single rank / when nothing crossed. (The per-step drift migration is the separate
     // chain in "stagen" after Push.)
-    id.bt_count = tl["before_timeintegrator"]->AddTask(&Particles::SendCnt, this,
-                                                       id.setgid);
-    id.bt_irecv = tl["before_timeintegrator"]->AddTask(&Particles::InitRecv, this,
-                                                       id.bt_count);
-    id.bt_sendp = tl["before_timeintegrator"]->AddTask(&Particles::SendP, this,
-                                                       id.bt_irecv);
-    id.bt_recvp = tl["before_timeintegrator"]->AddTask(&Particles::RecvP, this,
-                                                       id.bt_sendp);
-    id.bt_crecv = tl["before_timeintegrator"]->AddTask(&Particles::ClearRecv, this,
-                                                       id.bt_recvp);
-    id.bt_csend = tl["before_timeintegrator"]->AddTask(&Particles::ClearSend, this,
-                                                       id.bt_crecv);
+    id.csend = SendRecvParticles(*tl["before_timeintegrator"], id.setgid);
 
     // Self-gravitating (sink) particles are integrated WITHIN the time integrator
     // so they are stage-synchronized with the gravity solve and the gas, giving a
@@ -117,21 +120,8 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.newgid = tl["stagen"]->AddTask(&Particles::SetGIDFromPosition, this, id.push);
     // cross-rank particle migration (same chain as tracers, driven by the sendlist
     // populated in SetGIDFromPosition); no-ops on a single rank
-    id.count  = tl["stagen"]->AddTask(&Particles::SendCnt, this, id.newgid);
-    id.irecv  = tl["stagen"]->AddTask(&Particles::InitRecv, this, id.count);
-    id.sendp  = tl["stagen"]->AddTask(&Particles::SendP, this, id.irecv);
-    id.recvp  = tl["stagen"]->AddTask(&Particles::RecvP, this, id.sendp);
-    id.crecv  = tl["stagen"]->AddTask(&Particles::ClearRecv, this, id.recvp);
-    id.csend  = tl["stagen"]->AddTask(&Particles::ClearSend, this, id.crecv);
+    id.csend = SendRecvParticles(*tl["stagen"], id.newgid);
 
-    // operator-split sink physics at the last RK stage, ordered create -> merge ->
-    // accrete. Creation and accretion follow their flags; merging always runs and
-    // completes survivor migration before accretion.
-    //   create  (<particles>/creation) : new sinks are massless; the AccreteMass reset
-    //           that follows seeds them conservatively (Moon & Ostriker 2025 eq. 54).
-    //   merge                       : combine overlapping/face-touching CVs, so
-    //           AccreteMass never sees overlapping control volumes.
-    //   accrete (<particles>/accretion): control-volume gas -> sink.
     // release the potential exchange's buffers once the stage is done with them
     id.xphi_csend = tl["after_stagen"]->AddTask(&Particles::XPhiClearSend, this, none);
     id.xphi_crecv = tl["after_stagen"]->AddTask(&Particles::XPhiClearRecv, this,
@@ -141,40 +131,96 @@ void Particles::AssembleTasks(std::map<std::string, std::shared_ptr<TaskList>> t
     id.dm_crecv = tl["after_stagen"]->AddTask(&Particles::DMeshClearRecv, this,
                                               id.dm_csend);
 
-    TaskID dep = none;
-    if (accretion && creation) {
-      id.create = tl["after_stagen"]->AddTask(&Particles::CreateSinks, this, dep);
-      dep = id.create;
+    // Operator-split sink physics after the time integrator, ordered create -> merge ->
+    // accrete. Creation and accretion follow their flags; merging always runs and
+    // completes survivor migration before accretion.
+    //   create  (<particles>/creation) : new sinks are massless; the AccreteMass reset
+    //           that follows seeds them conservatively (Moon & Ostriker 2025 eq. 54).
+    //   merge                       : combine overlapping/face-touching CVs, so
+    //           AccreteMass never sees overlapping control volumes.
+    //   accrete (<particles>/accretion): control-volume gas -> sink.
+    id.create = none;
+    if (creation) {
+      id.create = tl["after_timeintegrator"]->AddTask(&Particles::CreateSinks, this, none);
     }
-    id.merge = tl["after_stagen"]->AddTask(&Particles::MergeSinks, this, dep);
-    dep = id.merge;
-    dep = tl["after_stagen"]->AddTask(&Particles::SetGIDFromPosition, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::SendCnt, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::InitRecv, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::SendP, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::RecvP, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::ClearRecv, this, dep);
-    dep = tl["after_stagen"]->AddTask(&Particles::ClearSend, this, dep);
+    id.gas_crecv = none;
     if (accretion) {
-      id.accrete = tl["after_stagen"]->AddTask(&Particles::AccreteMass, this, dep);
-      dep = id.accrete;
+      id.merge = tl["after_timeintegrator"]->AddTask(&Particles::MergeSinks, this,
+                                                     id.create);
+      id.newgid = tl["after_timeintegrator"]->AddTask(&Particles::SetGIDFromPosition,
+                                                      this, id.merge);
+      id.csend = SendRecvParticles(*tl["after_timeintegrator"], id.newgid);
+      id.accrete = tl["after_timeintegrator"]->AddTask(&Particles::AccreteMass,
+                                                       this, id.csend);
+      // The completed after_stagen list has cleared the ordinary gas exchange.
+      // Stage -1 initializes/clears boundary communication without flux exchange.
+      if (pmy_pack->phydro != nullptr) {
+        auto *phydro = pmy_pack->phydro;
+        id.gas_restu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RestrictU,
+                                                           phydro, id.accrete);
+        id.gas_irecv = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->InitRecv(d, -1);
+        }, id.gas_restu);
+        id.gas_sendu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::SendU,
+                                                           phydro, id.gas_irecv);
+        id.gas_recvu = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::RecvU,
+                                                           phydro, id.gas_sendu);
+        id.gas_prol = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::Prolongate,
+                                                          phydro, id.gas_recvu);
+        id.gas_bcs = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ApplyPhysicalBCs,
+                                                         phydro, id.gas_prol);
+        id.gas_c2p = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::ConToPrim,
+                                                         phydro, id.gas_bcs);
+        id.gas_newdt = tl["after_timeintegrator"]->AddTask(&hydro::Hydro::NewTimeStep,
+                                                           phydro, id.gas_c2p);
+        id.gas_csend = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->ClearSend(d, -1);
+        }, id.gas_newdt);
+        id.gas_crecv = tl["after_timeintegrator"]->AddTask([phydro](Driver *d, int) {
+          return phydro->ClearRecv(d, -1);
+        }, id.gas_csend);
+      }
+      if (pmy_pack->pmhd != nullptr) {
+        auto *pmhd = pmy_pack->pmhd;
+        id.gas_restu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictU,
+                                                           pmhd, id.accrete);
+        id.gas_restb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RestrictB,
+                                                           pmhd, id.gas_restu);
+        id.gas_irecv = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->InitRecv(d, -1);
+        }, id.gas_restb);
+        id.gas_sendu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendU,
+                                                           pmhd, id.gas_irecv);
+        id.gas_recvu = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvU,
+                                                           pmhd, id.gas_sendu);
+        id.gas_sendb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::SendB,
+                                                           pmhd, id.gas_recvu);
+        id.gas_recvb = tl["after_timeintegrator"]->AddTask(&mhd::MHD::RecvB,
+                                                           pmhd, id.gas_sendb);
+        id.gas_prol = tl["after_timeintegrator"]->AddTask(&mhd::MHD::Prolongate,
+                                                          pmhd, id.gas_recvb);
+        id.gas_bcs = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ApplyPhysicalBCs,
+                                                         pmhd, id.gas_prol);
+        id.gas_c2p = tl["after_timeintegrator"]->AddTask(&mhd::MHD::ConToPrim,
+                                                         pmhd, id.gas_bcs);
+        id.gas_newdt = tl["after_timeintegrator"]->AddTask(&mhd::MHD::NewTimeStep,
+                                                           pmhd, id.gas_c2p);
+        id.gas_csend = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->ClearSend(d, -1);
+        }, id.gas_newdt);
+        id.gas_crecv = tl["after_timeintegrator"]->AddTask([pmhd](Driver *d, int) {
+          return pmhd->ClearRecv(d, -1);
+        }, id.gas_csend);
+      }
     }
-    id.newdt = tl["after_stagen"]->AddTask(&Particles::NewTimeStep, this, dep);
+    id.newdt = tl["after_timeintegrator"]->AddTask(&Particles::NewTimeStep,
+                                                   this, id.gas_crecv);
   } else {
     // Tracer / cosmic-ray (drift) particles: integrated once per cycle in the
     // "before_timeintegrator" task list (no gravity coupling).
     id.push   = tl["before_timeintegrator"]->AddTask(&Particles::Push, this, none);
     id.newgid = tl["before_timeintegrator"]->AddTask(&Particles::NewGID, this, id.push);
-    id.count  = tl["before_timeintegrator"]->AddTask(&Particles::SendCnt, this,
-                                                     id.newgid);
-    id.irecv  = tl["before_timeintegrator"]->AddTask(&Particles::InitRecv, this,
-                                                     id.count);
-    id.sendp  = tl["before_timeintegrator"]->AddTask(&Particles::SendP, this, id.irecv);
-    id.recvp  = tl["before_timeintegrator"]->AddTask(&Particles::RecvP, this, id.sendp);
-    id.crecv  = tl["before_timeintegrator"]->AddTask(&Particles::ClearRecv, this,
-                                                     id.recvp);
-    id.csend  = tl["before_timeintegrator"]->AddTask(&Particles::ClearSend, this,
-                                                     id.crecv);
+    id.csend = SendRecvParticles(*tl["before_timeintegrator"], id.newgid);
   }
 
   return;
@@ -218,10 +264,8 @@ TaskStatus Particles::SetGIDFromPosition(Driver *pdrive, int stage) {
     return TaskStatus::complete;
   }
 
-  // On strictly periodic meshes, wrap particle positions back into the domain when
-  // they exit (e.g. bulk-advection tests). The start-of-step position IPX0 is shifted
-  // by the SAME offset so cell-crossing detection in AccreteMass stays consistent
-  // across the wrap.
+  // On strictly periodic meshes, wrap current and saved start-of-step positions by
+  // the same offset so RK3 combines positions in the same periodic image.
   const bool wrap = pmy_pack->pmesh->strictly_periodic;
   const bool has_prev = (nrdata > IPX0);   // IPX0.. exist only in the sink layout
   auto &msz = pmy_pack->pmesh->mesh_size;
@@ -254,9 +298,7 @@ TaskStatus Particles::SetGIDFromPosition(Driver *pdrive, int stage) {
   Kokkos::deep_copy(d_nstray, 0);
 
   par_for("part_setgid", DevExeSpace(), 0, npart-1, KOKKOS_LAMBDA(const int p) {
-    // wrap positions back into the domain on strictly-periodic meshes (IPX0 shifted by
-    // the same offset so AccreteMass cell-crossing detection stays consistent across the
-    // wrap)
+    // Keep current and saved positions in the same periodic image for RK3.
     if (wrap) {
       Real s;
       s = Kokkos::floor((pr(IPX, p) - xmin)/Lx)*Lx;
@@ -588,7 +630,6 @@ TaskStatus Particles::SendP(Driver *pdrive, int stage) {
 
 TaskStatus Particles::RecvP(Driver *pdrive, int stage) {
   TaskStatus tstat = pbval_part->RecvAndUnpackPrtcls();
-  if (tstat == TaskStatus::complete) CheckSinkSanity("migration receive", stage);
   return tstat;
 }
 
@@ -618,13 +659,12 @@ TaskStatus Particles::ClearRecv(Driver *pdrive, int stage) {
 //! \brief Compute the particle timestep from end-of-cycle velocities: dtnew =
 //! cfl_par * min over particles of 1/sqrt((v1/dx1)^2+(v2/dx2)^2+(v3/dx3)^2), using each
 //! particle's own MeshBlock cell sizes (handles AMR levels automatically). Note
-//! Mesh::NewTimeStep applies NO cfl factor to ppart->dtnew, so the safety factor lives
-//! here; cfl_par=0.5 (default) guarantees at most one cell crossed per step, as the
-//! control-volume accretion's cell-crossing correction assumes.
+//! Mesh::NewTimeStep applies no CFL factor to ppart->dtnew, so cfl_par is applied here
+//! to resolve particle motion on the mesh cell-crossing timescale.
 
 TaskStatus Particles::NewTimeStep(Driver *pdriver, int stage) {
   if (stage != pdriver->nexp_stages) return TaskStatus::complete;  // once per cycle
-  CheckSinkSanity("timestep", stage);
+  dtnew = std::numeric_limits<Real>::max();
   if (nprtcl_thispack <= 0) return TaskStatus::complete;
 
   auto &pr = prtcl_rdata;
@@ -649,7 +689,6 @@ TaskStatus Particles::NewTimeStep(Driver *pdriver, int stage) {
   if (max_vdx > 0.0) {
     dtnew = cfl_par/max_vdx;
   }
-  // else: all particles at rest -- keep the previous (or pgen-seeded) dtnew
 
   return TaskStatus::complete;
 }

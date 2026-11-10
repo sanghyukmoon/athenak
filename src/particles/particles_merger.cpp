@@ -27,7 +27,7 @@
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
 #include "particles.hpp"
-#include "sink_merge.hpp"
+#include "sink_particles.hpp"
 #include "coordinates/cell_locations.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -37,7 +37,7 @@
 namespace particles {
 
 namespace {
-constexpr int REC = 11;   // per-sink record: x,y,z,vx,vy,vz,m,dx1,dx2,dx3,tag
+constexpr int REC = 8;   // per-sink record: x,y,z,vx,vy,vz,m,tag
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -51,19 +51,14 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 
   const int nranks = global_variable::nranks;
   const int my_rank = global_variable::my_rank;
+  const int old_max_tag = created_total_;
 
-  auto &mbsize = pmy_pack->pmb->mb_size;
-  auto msz_h = mbsize.h_view;
-  const int gids = pmy_pack->gids;
-  const int nmb = pmy_pack->nmb_thispack;
   const bool per = pmy_pack->pmesh->strictly_periodic;
   auto &msz = pmy_pack->pmesh->mesh_size;
-  const Real L[3] = {msz.x1max-msz.x1min, msz.x2max-msz.x2min, msz.x3max-msz.x3min};
   const Real dlo[3] = {msz.x1min, msz.x2min, msz.x3min};
 
   auto refresh_return = [&]() {
     RefreshMeshParticleCounts();
-    CheckSinkSanity("merge", stage);
     return TaskStatus::complete;
   };
 
@@ -75,14 +70,10 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   Kokkos::deep_copy(hi, prtcl_idata);
   std::vector<Real> loc(static_cast<size_t>(nloc)*REC);
   for (int p = 0; p < nloc; ++p) {
-    int m = hi(PGID, p) - gids;
-    Real dx1 = msz_h(0).dx1, dx2 = msz_h(0).dx2, dx3 = msz_h(0).dx3;
-    if (m >= 0 && m < nmb) { dx1 = msz_h(m).dx1; dx2 = msz_h(m).dx2; dx3 = msz_h(m).dx3; }
     Real *rec = &loc[static_cast<size_t>(p)*REC];
     rec[0]=hr(IPX,p);  rec[1]=hr(IPY,p);  rec[2]=hr(IPZ,p);
     rec[3]=hr(IPVX,p); rec[4]=hr(IPVY,p); rec[5]=hr(IPVZ,p);
-    rec[6]=hr(IPM,p);  rec[7]=dx1; rec[8]=dx2; rec[9]=dx3;
-    rec[10]=static_cast<Real>(hi(PTAG,p));
+    rec[6]=hr(IPM,p);  rec[7]=static_cast<Real>(hi(PTAG,p));
   }
 
   // ---- gather every rank's sinks (cheap; sinks are few) ----
@@ -105,7 +96,6 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
 #else
   G = std::move(loc);
 #endif
-  if (Ntot < 2) return refresh_return();
 
   // ---- PTAGs must be globally unique --------------------------------------------------
   // Everything below keys survivors and absorbed sinks by tag, so two distinct sinks
@@ -119,7 +109,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   {
     std::vector<int> tags(Ntot);
     for (int i = 0; i < Ntot; ++i) {
-      tags[i] = static_cast<int>(G[static_cast<size_t>(i)*REC + 10]);
+      tags[i] = static_cast<int>(G[static_cast<size_t>(i)*REC + 7]);
     }
     std::vector<int> sorted_tags = tags;
     std::sort(sorted_tags.begin(), sorted_tags.end());
@@ -139,43 +129,56 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
   struct Surv { Real x, y, z, vx, vy, vz, M; };
   std::map<int, Surv> survmap;
   std::set<int> absorbed;
+  std::vector<int> new_tags;
   std::vector<SinkMergeRecord<Real>> sinks;
   for (int i=0; i<Ntot; ++i) {
     const Real *r=&G[static_cast<size_t>(i)*REC];
-    sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]}, {r[7],r[8],r[9]},
-                     r[6], 1.0, static_cast<int>(r[10])});
+    sinks.push_back({{r[0],r[1],r[2]}, {r[3],r[4],r[5]},
+                     r[6], 1.0, static_cast<int>(r[7])});
   }
-  auto locate = [&](SinkMergeRecord<Real> &s) {
-    auto *pm=pmy_pack->pmesh;
-    for (int g=0; g<pm->nmb_total; ++g) {
-      const auto &ll=pm->lloc_eachmb[g];
-      const int shift=ll.level-pm->root_level;
-      const int nb[3]={pm->nmb_rootx1<<shift,pm->nmb_rootx2<<shift,
-                       pm->nmb_rootx3<<shift};
-      const auto ix=std::array<std::int64_t,3>{ll.lx1,ll.lx2,ll.lx3};
-      bool inside=true;
-      for (int c=0; c<3; ++c) {
-        const Real lo=LeftEdgeX(ix[c],nb[c],dlo[c],dlo[c]+L[c]);
-        const Real hi=LeftEdgeX(ix[c]+1,nb[c],dlo[c],dlo[c]+L[c]);
-        inside=inside && s.x[c]>=lo && s.x[c]<hi;
-      }
-      if (inside) {
-        s.dx={L[0]/(nb[0]*pm->mb_indcs.nx1), L[1]/(nb[1]*pm->mb_indcs.nx2),
-              L[2]/(nb[2]*pm->mb_indcs.nx3)};
-        return;
-      }
-    }
-    std::cerr << "Merged sink has no owning MeshBlock" << std::endl;
-    std::exit(EXIT_FAILURE);
-  };
+  auto *pm=pmy_pack->pmesh;
+  const int shift=pm->max_level-pm->root_level;
+  const int nx1_eff=pm->mesh_indcs.nx1<<shift;
+  const int nx2_eff=pm->mesh_indcs.nx2<<shift;
+  const int nx3_eff=pm->mesh_indcs.nx3<<shift;
   ResolveSinkMergers(sinks, std::array<Real,3>{dlo[0],dlo[1],dlo[2]},
-                    std::array<Real,3>{L[0],L[1],L[2]}, per, locate);
+                    std::array<Real,3>{msz.x1max,msz.x2max,msz.x3max},
+                    std::array<int,3>{nx1_eff,nx2_eff,nx3_eff}, per);
   for (const auto &s : sinks) {
     if (!s.alive) {
       absorbed.insert(s.tag);
-    } else if (s.changed) {
-      survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
+    } else {
+      if (s.mass == 0.0) new_tags.push_back(s.tag);
+      if (s.changed) {
+        survmap[s.tag]={s.x[0],s.x[1],s.x[2],s.v[0],s.v[1],s.v[2],s.mass};
+      }
     }
+  }
+  // Keep original tags as lookup keys; only destination arrays receive permanent IDs.
+  const auto FinalTag = [&](int tag) {
+    const auto it = std::lower_bound(new_tags.begin(), new_tags.end(), tag);
+    if (it == new_tags.end() || *it != tag) return tag;
+    return old_max_tag + 1 + static_cast<int>(it - new_tags.begin());
+  };
+  created_total_ = old_max_tag + static_cast<int>(new_tags.size());
+  // Publish even an empty, single-particle or unchanged survivor list. Migration may
+  // reorder local particles afterward; this snapshot stays immutable through accretion.
+  if (accretion) {
+    const int nsurv = Ntot - static_cast<int>(absorbed.size());
+    Kokkos::realloc(global_prtcl_rdata, IPM+1, nsurv);
+    Kokkos::realloc(global_prtcl_tags, nsurv);
+    auto gr = Kokkos::create_mirror_view(global_prtcl_rdata);
+    auto gt = Kokkos::create_mirror_view(global_prtcl_tags);
+    int p = 0;
+    for (const auto &s : sinks) {
+      if (!s.alive) continue;
+      gr(IPX,p)=s.x[0];   gr(IPY,p)=s.x[1];   gr(IPZ,p)=s.x[2];
+      gr(IPVX,p)=s.v[0];  gr(IPVY,p)=s.v[1];  gr(IPVZ,p)=s.v[2];
+      gr(IPM,p)=s.mass;   gt(p)=FinalTag(s.tag);
+      ++p;
+    }
+    Kokkos::deep_copy(global_prtcl_rdata, gr);
+    Kokkos::deep_copy(global_prtcl_tags, gt);
   }
   if (absorbed.empty()) return refresh_return();
   if (my_rank==0) std::printf("MergeSinks: iterative removed %zu sinks cycle=%d\n",
@@ -214,18 +217,9 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     hr(IPX,p)=s.x;   hr(IPY,p)=s.y;   hr(IPZ,p)=s.z;
     hr(IPVX,p)=s.vx; hr(IPVY,p)=s.vy; hr(IPVZ,p)=s.vz;
     hr(IPM,p)=s.M;
-    // treat the merge as NOT a cell crossing so the following AccreteMass does not
-    // re-accrete a spurious old control volume
+    // Keep previous-position state consistent with the moved survivor.
     hr(IPX0,p)=s.x;  hr(IPY0,p)=s.y;  hr(IPZ0,p)=s.z;
-    // re-derive the owning block from the COM (lower-inclusive). If the COM left this
-    // rank, keep the old PGID; the migration chain relocates the sink next cycle.
-    for (int mm = 0; mm < nmb; ++mm) {
-      if (s.x >= msz_h(mm).x1min && s.x < msz_h(mm).x1max &&
-          s.y >= msz_h(mm).x2min && s.y < msz_h(mm).x2max &&
-          s.z >= msz_h(mm).x3min && s.z < msz_h(mm).x3max) {
-        hi(PGID,p) = gids + mm; break;
-      }
-    }
+    // Ownership is refreshed by the following SetGIDFromPosition task.
   }
 
   // ---- compact out absorbed slots (order-preserving) ----
@@ -243,6 +237,7 @@ TaskStatus Particles::MergeSinks(Driver *pdriver, int stage) {
     const int src = keep[n];
     for (int v = 0; v < nrdata; ++v) hr2(v, n) = hr(v, src);
     for (int v = 0; v < nidata; ++v) hi2(v, n) = hi(v, src);
+    hi2(PTAG, n) = FinalTag(hi(PTAG, src));
   }
   Kokkos::deep_copy(prtcl_rdata, hr2);
   Kokkos::deep_copy(prtcl_idata, hi2);

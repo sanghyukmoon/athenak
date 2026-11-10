@@ -54,15 +54,22 @@ struct ParticlesTaskIDs {
   TaskID irecv;
   TaskID sendp;
   TaskID recvp;
-  TaskID csend;
   TaskID crecv;
-  // regrid-driven cross-rank particle migration chain (before_timeintegrator)
-  TaskID bt_count;
-  TaskID bt_irecv;
-  TaskID bt_sendp;
-  TaskID bt_recvp;
-  TaskID bt_csend;
-  TaskID bt_crecv;
+  TaskID csend;
+  // Post-accretion gas refresh.
+  TaskID gas_restu;
+  TaskID gas_restb;
+  TaskID gas_irecv;
+  TaskID gas_sendu;
+  TaskID gas_recvu;
+  TaskID gas_sendb;
+  TaskID gas_recvb;
+  TaskID gas_prol;
+  TaskID gas_bcs;
+  TaskID gas_c2p;
+  TaskID gas_newdt;
+  TaskID gas_csend;
+  TaskID gas_crecv;
   // gravitational-potential halo exchange, split into tasks like every other exchange
   TaskID xphi_irecv;
   TaskID xphi_rest;
@@ -95,6 +102,9 @@ class Particles {
   int nrdata, nidata;
   DvceArray2D<Real> prtcl_rdata;   // real number properties each particle (x,v,etc.)
   DvceArray2D<int>  prtcl_idata;   // integer properties each particle (gid, tag, etc.)
+  // Immutable post-merger snapshot for this step's accretion; not restart state.
+  DvceArray2D<Real> global_prtcl_rdata;  // rows IPX through IPM
+  DvceArray1D<int> global_prtcl_tags;
   // Particle timestep constraint, consumed by Mesh::NewTimeStep as dt = min(dt, dtnew).
   // Initialised to "no constraint" in the constructor. It MUST have a defined value from
   // the moment the module exists: with <particles>/ppc = 0 (creation-driven runs) there
@@ -110,68 +120,14 @@ class Particles {
   // Particle CFL number (<particles>/cfl_par, default 0.5): dtnew = cfl_par*min(dx/|v|)
   // over particles. Mesh::NewTimeStep applies NO cfl factor to ppart->dtnew and caps
   // per-cycle dt growth at 2x, so 0.5 guarantees sinks cross at most one cell per step
-  // (required by the control-volume accretion's cell-crossing correction).
+  // (required by neighbor-based particle migration).
   Real cfl_par;
 
-  // Enable control-volume gas accretion onto sinks (<particles>/accretion, default
-  // false). When false the AccreteMass task is not registered at all, so orbit tests
-  // with inert/no gas never execute the accretion kernel.
-  bool accretion = false;
-
-  // Enable sink creation (<particles>/creation, default true): cells exceeding the
-  // Larson-Penston density threshold at a local potential minimum spawn a massless
-  // sink that the next AccreteMass reset seeds conservatively (Moon & Ostriker 2025
-  // section 3.4). Requires accretion = true.
-  bool creation = true;
-  // Optional AMR experiment: retain the uniform finest-grid creation threshold.
-  bool creation_finest_only = false;
-  int created_total_ = 0;   // running count, for unique tags
-
-  // Sink-sink merging is unconditional: sinks whose 27-cell control volumes overlap
-  // or share a face are combined, conserving mass and
-  // linear momentum. Independent of accretion (a decaying gravitational binary can merge
-  // with accretion off), but typically used with it -- merging removes the overlapping
-  // control volumes that AccreteMass cannot otherwise handle, so it is ordered
-  // create -> merge -> accrete. See particles_merger.cpp.
-  int sink_convergence = 1;  // 0: off; 1: directional mass flux; 2: velocity gradient
-
-  // Sink sanity check (<particles>/sanity_vmax, default 0 = off). When > 0, every step
-  // that changes sink state (push, migration receive, creation, merging, accretion) and
-  // the particle timestep check the rank's sinks for a non-finite position, velocity or
-  // mass, a negative mass, or a speed above sanity_vmax. The first hit prints the full
-  // record of every local sink -- plus, when the push or the accretion update produced
-  // the bad velocity, the inputs it was computed from -- and aborts the run. It only
-  // reads particle state, so a run that never trips it is bit-for-bit unchanged.
-  Real sanity_vmax = 0.0;
-  static constexpr int kSanityRec = 16;
-  DvceArray1D<int>  sanity_flag_;   // [1] 0 = clean, 1 = push, 2 = accretion
-  DvceArray1D<Real> sanity_rec_;    // [kSanityRec] inputs of the first flagged update
-  void CheckSinkSanity(const char *where, int stage);
-
-
-  // Cross-rank control-volume reset (MPI). When a sink's control volume reaches into an
-  // off-rank neighbour, the accretion kernel stages the off-rank-destined reset cells
-  // (owner_m, xw, yw, zw, rho, M1..3 post-reset, rho, M1..3 pre-reset) into cvemit_
-  // (cvemit_cnt_ = atomic count); ExchangeCVReset() then routes them host-side to every
-  // rank whose blocks' expanded (interior+ghost) bounds contain the cell; each receiver
-  // scatters the values to ALL its local coincident copies of u0/w0, at whatever
-  // refinement level those copies live (see particles_accretion.cpp for the level rule --
-  // the pre-reset values are what make the coarser-target case conservative).
-  // Sized once accretion is enabled.
-  static constexpr int NCVEMIT = 12;   // m, x, y, z, 4 post-reset, 4 pre-reset
-  DvceArray2D<Real> cvemit_;      // [cvemit_max_][NCVEMIT] staging buffer (device)
-  DvceArray1D<int>  cvemit_cnt_;  // [1] atomic write counter (device)
-  int cvemit_max_ = 0;
-  // Count of sinks whose control volume could not be processed this step (defensively
-  // skipped, e.g. a >1 level jump in the reach). Reported once with a rate limit: a
-  // silently skipped sink stops accreting while gas keeps flowing in, which shows up
-  // much later as a pile-up and a collapsing timestep.
-  DvceArray1D<int>  accskip_;     // [1] atomic count of skipped sinks (device)
-  int accskip_warned_ = 0;
-#if MPI_PARALLEL_ENABLED
-  // dedicated communicator for the CV scatter
-  MPI_Comm mpi_comm_cvscat_ = MPI_COMM_NULL;
-#endif
+  bool accretion;
+  bool creation;
+  bool creation_finest_only;
+  bool converging_flow;
+  int created_total_ = 0;   // permanent-ID high-water mark, retained across restarts
 
   // Particle-mesh coupling layer (allocated for sink type, nullptr for tracers).
   ParticleMesh *ppm = nullptr;
@@ -192,8 +148,7 @@ class Particles {
   // ---- host / MPI phase timers (env SINK_TIMERS) --------------------------------------
   // Wall-clock accounting for the sink module's HOST and MPI regions -- precisely what a
   // Kokkos profiler cannot see. kokkos-tools reports device kernels by label, but the
-  // per-step collectives, the host<->device particle mirrors and the host colouring loop
-  // are invisible to it, and those are the suspected cost at scale.
+  // per-step collectives and host<->device particle mirrors are invisible to it.
   //
   //   SINK_TIMERS=1  accumulate and report. Low perturbation, but Kokkos kernels are
   //                  asynchronous, so a region can absorb the completion of work launched
@@ -204,9 +159,8 @@ class Particles {
   //                  EXPOSES rather than causes. Perturbing by construction: an
   //                  attribution run, never a timing run.
   //
-  // ST_REFRESH is nested inside ST_CREATE and ST_MERGE, and ST_ALLTOALL inside
-  // ST_CVRESET, so those totals are INCLUSIVE -- do not add the column up.
-  enum SinkTimerId {ST_COLOUR=0, ST_CVRESET, ST_ALLTOALL, ST_CREATE, ST_MERGE, ST_REFRESH,
+  // ST_REFRESH is nested inside ST_CREATE and ST_MERGE, so totals are inclusive.
+  enum SinkTimerId {ST_CREATE=0, ST_MERGE, ST_REFRESH,
                     ST_NUM};
   int st_mode_ = 0;
   double st_time_[ST_NUM] = {};
@@ -266,7 +220,6 @@ class Particles {
   TaskStatus Push(Driver *pdriver, int stage);
   TaskStatus MergeSinks(Driver *pdriver, int stage);
   TaskStatus AccreteMass(Driver *pdriver, int stage);
-  void ExchangeCVReset();   // MPI: apply off-rank control-volume reset cells
   TaskStatus CreateSinks(Driver *pdriver, int stage);
   TaskStatus NewTimeStep(Driver *pdriver, int stage);
   TaskStatus NewGID(Driver *pdriver, int stage);

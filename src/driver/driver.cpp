@@ -582,8 +582,8 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         ExecuteTaskList(pmesh, "after_stagen", stage);
       }
 
-      // Work after time integrator indicated by "1" in stage
-      ExecuteTaskList(pmesh, "after_timeintegrator", 1);
+      // Work after the time integrator receives the final explicit-stage number.
+      ExecuteTaskList(pmesh, "after_timeintegrator", nexp_stages);
 
       // Diffusion coefficients may depend on the post-RK state. Refresh the global
       // stability bound before choosing the second Strang-split half-sweep.
