@@ -54,7 +54,11 @@ void SolveFaceMHD(const EOS_Data &eos, const RegionIndcs &indcs,
                   const DvceArray5D<Real> &bl, const DvceArray5D<Real> &br,
                   const DvceArray4D<Real> &bx,
                   const DvceArray5D<Real> &flx,
-                  const DvceArray4D<Real> &ey, const DvceArray4D<Real> &ez) {
+                  const DvceArray4D<Real> &ey, const DvceArray4D<Real> &ez,
+                  const bool use_uct = false,
+                  const DvceArray4D<Real> &uct_aL = {}, const DvceArray4D<Real> &uct_dL = {},
+                  const DvceArray4D<Real> &uct_dR = {}, const DvceArray4D<Real> &uct_vt1 = {},
+                  const DvceArray4D<Real> &uct_vt2 = {}) {
   if constexpr (rsolver_method_ == MHD_RSolver::advect) {
     Advect<ivx>(eos, m, k, j, i, is, js, ks, wl, wr, bl, br, bx, flx, ey, ez);
   } else if constexpr (rsolver_method_ == MHD_RSolver::llf) {
@@ -62,7 +66,8 @@ void SolveFaceMHD(const EOS_Data &eos, const RegionIndcs &indcs,
   } else if constexpr (rsolver_method_ == MHD_RSolver::hlle) {
     HLLE<ivx>(eos, m, k, j, i, is, js, ks, wl, wr, bl, br, bx, flx, ey, ez);
   } else if constexpr (rsolver_method_ == MHD_RSolver::hlld) {
-    HLLD<ivx>(eos, m, k, j, i, is, js, ks, wl, wr, bl, br, bx, flx, ey, ez);
+    HLLD<ivx>(eos, m, k, j, i, is, js, ks, wl, wr, bl, br, bx, flx, ey, ez,
+               use_uct, uct_aL, uct_dL, uct_dR, uct_vt1, uct_vt2);
   } else if constexpr (rsolver_method_ == MHD_RSolver::llf_sr) {
     LLF_SR<ivx>(eos, m, k, j, i, is, js, ks, wl, wr, bl, br, bx, flx, ey, ez);
   } else if constexpr (rsolver_method_ == MHD_RSolver::hlle_sr) {
@@ -104,6 +109,9 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     kl3 = ks-1; ku3 = ke+2;
   }
 
+  const bool use_uct_ = use_uct && pmy_pack->pmesh->multi_d;
+  const int ext = use_uct_ ? 2 : 1;  // PLM edge reads four samples across each edge.
+
   auto &eos_ = peos->eos_data;
   auto &size_ = pmy_pack->pmb->mb_size;
   auto &coord_ = pmy_pack->pcoord->coord_data;
@@ -123,9 +131,12 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     auto &e21 = e2x1;
 
     // CT-extended transverse range
+    auto aL = aL_x1f; auto dL = dL_x1f; auto dR = dR_x1f;
+    auto vt1 = vy_x1f; auto vt2 = vz_x1f;
+
     int jl = js, ju = je, kl = ks, ku = ke;
-    if (pmy_pack->pmesh->multi_d) { jl = js-1; ju = je+1; }
-    if (pmy_pack->pmesh->three_d) { kl = ks-1; ku = ke+1; }
+    if (pmy_pack->pmesh->multi_d) { jl = js-ext; ju = je+ext; }
+    if (pmy_pack->pmesh->three_d) { kl = ks-ext; ku = ke+ext; }
 
     // Reconstruct W over cells i in [il1-1, iu1], variables n in [0, nvars-1]
     ReconDispatch<IVX>(recon_method_, "mflux_x1_recon_w", nmb1,
@@ -147,7 +158,8 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
         const int is_ = is, js_ = js, ks_ = ks;
         SolveFaceMHD<rsolver_method_, IVX>(eos, indcs, size, coord,
                                            m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
+                                           wl, wr, bl, br, bx, flx, eyl, ezl,
+                                           use_uct_, aL, dL, dR, vt1, vt2);
       });
 
     // Scalar fluxes (upwind from sign of mass flux), active transverse range
@@ -174,19 +186,22 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     auto &e12 = e1x2;
     auto &e32 = e3x2;
 
+    auto aL = aL_x2f; auto dL = dL_x2f; auto dR = dR_x2f;
+    auto vt1 = vx_x2f; auto vt2 = vz_x2f;
+
     int kl = ks, ku = ke;
-    if (pmy_pack->pmesh->three_d) { kl = ks-1; ku = ke+1; }
+    if (pmy_pack->pmesh->three_d) { kl = ks-ext; ku = ke+ext; }
 
     // Reconstruct W over cells j in [jl2-1, ju2], i in [is-1, ie+1], n in [0, nvars-1]
     ReconDispatch<IVY>(recon_method_, "mflux_x2_recon_w", nmb1,
-        kl, ku, jl2-1, ju2, is-1, ie+1, eos_, true,  nvars, w0_, wl_, wr_);
+        kl, ku, jl2-1, ju2, is-ext, ie+ext, eos_, true,  nvars, w0_, wl_, wr_);
     // Reconstruct Bcc over cells j in [jl2-1, ju2], i in [is-1, ie+1], n in [0, 2]
     ReconDispatch<IVY>(recon_method_, "mflux_x2_recon_b", nmb1,
-        kl, ku, jl2-1, ju2, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+        kl, ku, jl2-1, ju2, is-ext, ie+ext, eos_, false, 3,     bcc0_, bl_, br_);
 
     // Riemann solve over faces j in [jl2, ju2], i in [is-1, ie+1]
     par_for("mflux_x2_rsolve", DevExeSpace(),
-      0, nmb1, kl, ku, jl2, ju2, is-1, ie+1,
+      0, nmb1, kl, ku, jl2, ju2, is-ext, ie+ext,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         auto eos = eos_;
         auto indcs = indcs_;
@@ -197,7 +212,8 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
         const int is_ = is, js_ = js, ks_ = ks;
         SolveFaceMHD<rsolver_method_, IVY>(eos, indcs, size, coord,
                                            m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
+                                           wl, wr, bl, br, bx, flx, eyl, ezl,
+                                           use_uct_, aL, dL, dR, vt1, vt2);
       });
 
     if (nvars > nmhd_) {
@@ -223,17 +239,20 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     auto &e23 = e2x3;
     auto &e13 = e1x3;
 
+    auto aL = aL_x3f; auto dL = dL_x3f; auto dR = dR_x3f;
+    auto vt1 = vx_x3f; auto vt2 = vy_x3f;
+
     // Reconstruct W over cells k in [kl3-1, ku3], j in [js-1, je+1], i in [is-1, ie+1],
     // variables n in [0, nvars-1]
     ReconDispatch<IVZ>(recon_method_, "mflux_x3_recon_w", nmb1,
-        kl3-1, ku3, js-1, je+1, is-1, ie+1, eos_, true,  nvars, w0_, wl_, wr_);
+        kl3-1, ku3, js-ext, je+ext, is-ext, ie+ext, eos_, true,  nvars, w0_, wl_, wr_);
     // Reconstruct Bcc over the same cells, components n in [0, 2]
     ReconDispatch<IVZ>(recon_method_, "mflux_x3_recon_b", nmb1,
-        kl3-1, ku3, js-1, je+1, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+        kl3-1, ku3, js-ext, je+ext, is-ext, ie+ext, eos_, false, 3,     bcc0_, bl_, br_);
 
     // Riemann solve over faces k in [kl3, ku3], j in [js-1, je+1], i in [is-1, ie+1]
     par_for("mflux_x3_rsolve", DevExeSpace(),
-      0, nmb1, kl3, ku3, js-1, je+1, is-1, ie+1,
+      0, nmb1, kl3, ku3, js-ext, je+ext, is-ext, ie+ext,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         auto eos = eos_;
         auto indcs = indcs_;
@@ -244,7 +263,8 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
         const int is_ = is, js_ = js, ks_ = ks;
         SolveFaceMHD<rsolver_method_, IVZ>(eos, indcs, size, coord,
                                            m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
+                                           wl, wr, bl, br, bx, flx, eyl, ezl,
+                                           use_uct_, aL, dL, dR, vt1, vt2);
       });
 
     if (nvars > nmhd_) {

@@ -13,10 +13,38 @@
 #include "driver/driver.hpp"
 #include "diffusion/resistivity.hpp"
 #include "mhd.hpp"
+#include "reconstruct/plm.hpp"
 
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
+
+namespace {
+// Reconstruct to the edge between samples -1 and 0. Only PLM is supported by UCT.
+template <typename F>
+KOKKOS_INLINE_FUNCTION
+void ReconstructEdge(const F &q, Real &qL, Real &qR) {
+  Real unused;
+  PLM(q(-2), q(-1), q(0), qL, unused);
+  PLM(q(-1), q(0), q(1), unused, qR);
+}
+
+template <typename F>
+KOKKOS_INLINE_FUNCTION
+Real InterpolateEdgeA(const F &q) {
+  Real qL, qR;
+  ReconstructEdge(q, qL, qR);
+  return fmin(1.0, fmax(0.0, 0.5*(qL+qR)));
+}
+
+template <typename F>
+KOKKOS_INLINE_FUNCTION
+Real InterpolateEdgeD(const F &q) {
+  Real qL, qR;
+  ReconstructEdge(q, qL, qR);
+  return fmax(0.0, 0.5*(qL+qR));
+}
+} // namespace
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -32,6 +60,154 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
   auto &size = pmy_pack->pmb->mb_size;
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
+
+  if (use_uct && pmy_pack->pmesh->multi_d) {
+    // Mignone & Del Zanna Eq. 33, extracted from David Velasco's UCT implementation.
+    const bool three_d = pmy_pack->pmesh->three_d;
+    auto bx1f_ = b0.x1f; auto bx2f_ = b0.x2f; auto bx3f_ = b0.x3f;
+    auto aL1 = aL_x1f; auto dL1 = dL_x1f; auto dR1 = dR_x1f;
+    auto aL2 = aL_x2f; auto dL2 = dL_x2f; auto dR2 = dR_x2f;
+    auto aL3 = aL_x3f; auto dL3 = dL_x3f; auto dR3 = dR_x3f;
+    auto vy1 = vy_x1f; auto vz1 = vz_x1f;
+    auto vx2 = vx_x2f; auto vz2 = vz_x2f;
+    auto vx3 = vx_x3f; auto vy3 = vy_x3f;
+    auto e1 = efld.x1e; auto e2 = efld.x2e; auto e3 = efld.x3e;
+    auto e2x1_ = e2x1; auto e1x2_ = e1x2;
+    par_for("emf_uct", DevExeSpace(), 0, nmb1, ks, ke+(three_d ? 1 : 0),
+      js, je+1, is, ie+1,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        if (three_d) {
+          // ---- E1 at x-edge (i, j-1/2, k-1/2) ----
+          // E_x = vz*By - vy*Bz  (with upwind dissipation)
+          // x2-face quantities at (i, j-1/2, k): reconstruct along k to k-1/2
+          // x3-face quantities at (i, j, k-1/2): reconstruct along j to j-1/2
+          {
+            // UCT coefficients: reconstruct to edge using PLM interpolation
+            // x2-face coefficients at (i, j-1/2, k): reconstruct along k to k-1/2
+            Real ay_S = InterpolateEdgeA([&](const int o) {return aL2(m,k+o,j,i);});
+            Real ay_N = 1.0 - ay_S;
+            Real dy_S = InterpolateEdgeD([&](const int o) {return dL2(m,k+o,j,i);});
+            Real dy_N = InterpolateEdgeD([&](const int o) {return dR2(m,k+o,j,i);});
+            // x3-face coefficients at (i, j, k-1/2): reconstruct along j to j-1/2
+            Real az_B = InterpolateEdgeA([&](const int o) {return aL3(m,k,j+o,i);});
+            Real az_T = 1.0 - az_B;
+            Real dz_B = InterpolateEdgeD([&](const int o) {return dL3(m,k,j+o,i);});
+            Real dz_T = InterpolateEdgeD([&](const int o) {return dR3(m,k,j+o,i);});
+
+            // Transverse velocities: reconstruct to L/R at edge
+            // vz from x2-faces: reconstruct along k to B/T
+            Real vz_B, vz_T;
+            ReconstructEdge([&](const int o) {return vz2(m,k+o,j,i);}, vz_B, vz_T);
+            // vy from x3-faces: reconstruct along j to S/N
+            Real vy_S, vy_N;
+            ReconstructEdge([&](const int o) {return vy3(m,k,j+o,i);}, vy_S, vy_N);
+
+            // Staggered B: reconstruct to L/R at edge
+            // By from x2-faces: reconstruct along k to B/T
+            Real By_B, By_T;
+            ReconstructEdge([&](const int o) {return bx2f_(m,k+o,j,i);}, By_B, By_T);
+            // Bz from x3-faces: reconstruct along j to S/N
+            Real Bz_S, Bz_N;
+            ReconstructEdge([&](const int o) {return bx3f_(m,k,j+o,i);}, Bz_S, Bz_N);
+
+            // UCT composition: E_x = +vz*By - vy*Bz (with dissipation)
+            // All quantities (B, v, a, d) reconstructed to edge via PLM interp
+            e1(m,k,j,i) = -(ay_S*vy_S*Bz_S + ay_N*vy_N*Bz_N)
+                            +(az_B*vz_B*By_B + az_T*vz_T*By_T)
+                            +(dy_N*Bz_N - dy_S*Bz_S)
+                            -(dz_T*By_T - dz_B*By_B);
+          }
+
+          // ---- E2 at y-edge (i-1/2, j, k-1/2) ----
+          // E_y = vx*Bz - vz*Bx  (with upwind dissipation)
+          // x3-face quantities at (i, j, k-1/2): reconstruct along i to i-1/2
+          // x1-face quantities at (i-1/2, j, k): reconstruct along k to k-1/2
+          {
+            // UCT coefficients: reconstruct to edge using PLM interpolation
+            // x3-face coefficients at (i, j, k-1/2): reconstruct along i to i-1/2
+            Real az_B = InterpolateEdgeA([&](const int o) {return aL3(m,k,j,i+o);});
+            Real az_T = 1.0 - az_B;
+            Real dz_B = InterpolateEdgeD([&](const int o) {return dL3(m,k,j,i+o);});
+            Real dz_T = InterpolateEdgeD([&](const int o) {return dR3(m,k,j,i+o);});
+            // x1-face coefficients at (i-1/2, j, k): reconstruct along k to k-1/2
+            Real ax_W = InterpolateEdgeA([&](const int o) {return aL1(m,k+o,j,i);});
+            Real ax_E = 1.0 - ax_W;
+            Real dx_W = InterpolateEdgeD([&](const int o) {return dL1(m,k+o,j,i);});
+            Real dx_E = InterpolateEdgeD([&](const int o) {return dR1(m,k+o,j,i);});
+
+            // Transverse velocities: reconstruct to L/R at edge
+            // vx from x3-faces: reconstruct along i to W/E
+            Real vx_W, vx_E;
+            ReconstructEdge([&](const int o) {return vx3(m,k,j,i+o);}, vx_W, vx_E);
+            // vz from x1-faces: reconstruct along k to B/T
+            Real vz_B, vz_T;
+            ReconstructEdge([&](const int o) {return vz1(m,k+o,j,i);}, vz_B, vz_T);
+
+            // Staggered B: reconstruct to L/R at edge
+            // Bz from x3-faces: reconstruct along i to W/E
+            Real Bz_W, Bz_E;
+            ReconstructEdge([&](const int o) {return bx3f_(m,k,j,i+o);}, Bz_W, Bz_E);
+            // Bx from x1-faces: reconstruct along k to B/T
+            Real Bx_B, Bx_T;
+            ReconstructEdge([&](const int o) {return bx1f_(m,k+o,j,i);}, Bx_B, Bx_T);
+
+            // UCT composition: E_y = +vx*Bz - vz*Bx (with dissipation)
+            // All quantities (B, v, a, d) reconstructed to edge via PLM interp
+            e2(m,k,j,i) = -(az_B*vz_B*Bx_B + az_T*vz_T*Bx_T)
+                            +(ax_W*vx_W*Bz_W + ax_E*vx_E*Bz_E)
+                            +(dz_T*Bx_T - dz_B*Bx_B)
+                            -(dx_E*Bz_E - dx_W*Bz_W);
+          }
+
+        } else {
+          e2(m,ks,j,i) = e2x1_(m,ks,j,i);
+          e2(m,ke+1,j,i) = e2x1_(m,ks,j,i);
+          e1(m,ks,j,i) = e1x2_(m,ks,j,i);
+          e1(m,ke+1,j,i) = e1x2_(m,ks,j,i);
+        }
+        // ---- E3 at z-edge (i-1/2, j-1/2, k) ----
+        // E_z = vy*Bx - vx*By  (with upwind dissipation)
+        // x1-face quantities at (i-1/2, j, k): reconstruct along j to j-1/2
+        // x2-face quantities at (i, j-1/2, k): reconstruct along i to i-1/2
+        {
+          // UCT coefficients: reconstruct to edge using PLM interpolation
+          // x1-face coefficients at (i-1/2, j, k): reconstruct along j to j-1/2
+          Real ax_W = InterpolateEdgeA([&](const int o) {return aL1(m,k,j+o,i);});
+          Real ax_E = 1.0 - ax_W;
+          Real dx_W = InterpolateEdgeD([&](const int o) {return dL1(m,k,j+o,i);});
+          Real dx_E = InterpolateEdgeD([&](const int o) {return dR1(m,k,j+o,i);});
+          // x2-face coefficients at (i, j-1/2, k): reconstruct along i to i-1/2
+          Real ay_S = InterpolateEdgeA([&](const int o) {return aL2(m,k,j,i+o);});
+          Real ay_N = 1.0 - ay_S;
+          Real dy_S = InterpolateEdgeD([&](const int o) {return dL2(m,k,j,i+o);});
+          Real dy_N = InterpolateEdgeD([&](const int o) {return dR2(m,k,j,i+o);});
+
+          // Transverse velocities: reconstruct to L/R at edge
+          // vx from x2-faces: reconstruct along i to W/E
+          Real vx_W, vx_E;
+          ReconstructEdge([&](const int o) {return vx2(m,k,j,i+o);}, vx_W, vx_E);
+          // vy from x1-faces: reconstruct along j to S/N
+          Real vy_S, vy_N;
+          ReconstructEdge([&](const int o) {return vy1(m,k,j+o,i);}, vy_S, vy_N);
+
+          // Staggered B: reconstruct to L/R at edge
+          // By from x2-faces: reconstruct along i to W/E
+          Real By_W, By_E;
+          ReconstructEdge([&](const int o) {return bx2f_(m,k,j,i+o);}, By_W, By_E);
+          // Bx from x1-faces: reconstruct along j to S/N
+          Real Bx_S, Bx_N;
+          ReconstructEdge([&](const int o) {return bx1f_(m,k,j+o,i);}, Bx_S, Bx_N);
+
+          // UCT composition: E_z = vy*Bx - vx*By (with dissipation)
+          // All quantities (B, v, a, d) reconstructed to edge via PLM interp
+          e3(m,k,j,i) = -(ax_W*vx_W*By_W + ax_E*vx_E*By_E)
+                          +(ay_S*vy_S*Bx_S + ay_N*vy_N*Bx_N)
+                          +(dx_E*By_E - dx_W*By_W)
+                          -(dy_N*Bx_N - dy_S*Bx_S);
+        }
+      });
+    return TaskStatus::complete;
+  }
 
   //---- 1-D problem:
   //  copy face-centered E-fields to edges and return.

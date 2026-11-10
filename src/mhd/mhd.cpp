@@ -70,6 +70,40 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   // Total number of MeshBlocks on this rank to be used in array dimensioning
   int nmb = std::max((ppack->nmb_thispack), (ppack->pmesh->nmb_maxperrank));
 
+  const std::string emf = pin->GetOrAddString("mhd", "emf", "ct_contact");
+  if (emf != "ct_contact" && emf != "uct_hlld" && emf != "uct") {
+    std::cout << "### FATAL ERROR: <mhd>/emf = '" << emf
+              << "' not implemented" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  use_uct = (emf != "ct_contact");
+  if (use_uct) {
+    auto *pm = pmy_pack->pmesh;
+    bool periodic = true;
+    const int ndir = pm->three_d ? 3 : (pm->two_d ? 2 : 1);
+    for (int d=0; d<2*ndir; ++d) {
+      periodic = periodic && pm->mesh_bcs[d] == BoundaryFlag::periodic;
+    }
+    if (pin->GetString("mhd", "eos") != "isothermal" ||
+        pin->GetString("mhd", "rsolver") != "hlld" ||
+        pin->GetOrAddString("mhd", "reconstruct", "plm") != "plm" ||
+        pin->GetString("time", "evolution") != "dynamic" ||
+        pin->GetOrAddString("time", "integrator", "rk2") != "rk2" ||
+        pin->GetOrAddString("time", "sts_integrator", "none") != "none" ||
+        pin->GetOrAddBoolean("mhd", "fofc", false) ||
+        pin->GetOrAddInteger("mhd", "nscalars", 0) != 0 ||
+        pmy_pack->pcoord->is_special_relativistic ||
+        pmy_pack->pcoord->is_general_relativistic ||
+        pmy_pack->pcoord->is_dynamical_relativistic ||
+        pm->mb_indcs.ng < 3 || pm->multilevel || !periodic ||
+        pin->DoesBlockExist("shearing_box")) {
+      std::cout << "### FATAL ERROR: UCT-HLLD requires dynamic Newtonian isothermal "
+                << "HLLD+PLM+RK2, >=3 ghost cells, a uniform periodic grid, "
+                << "and no FOFC, STS, shear, or scalars" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
   // (1) construct EOS object (no default)
   std::string eqn_of_state = pin->GetString("mhd","eos");
   // ideal gas EOS
@@ -176,6 +210,12 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
                              (has_sts_resistivity && peos->eos_data.is_ideal));
   has_any_sts_field_update = has_sts_resistivity;
   has_any_sts_diffusion = (has_any_sts_cell_update || has_any_sts_field_update);
+
+  if (use_uct && (has_explicit_viscosity || has_explicit_resistivity ||
+                  has_explicit_conduction || has_any_sts_diffusion)) {
+    std::cout << "### FATAL ERROR: UCT-HLLD does not support diffusion" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Source terms (if needed)
   if (pin->DoesBlockExist("mhd_srcterms")) {
@@ -428,6 +468,26 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(wr3d, nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
       Kokkos::realloc(bl3d, nmb, 3, ncells3, ncells2, ncells1);
       Kokkos::realloc(br3d, nmb, 3, ncells3, ncells2, ncells1);
+
+      if (use_uct && pmy_pack->pmesh->multi_d) {
+        Kokkos::realloc(aL_x1f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(dL_x1f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(dR_x1f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(vy_x1f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(vz_x1f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(aL_x2f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(dL_x2f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(dR_x2f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(vx_x2f, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(vz_x2f, nmb, ncells3, ncells2, ncells1);
+        if (pmy_pack->pmesh->three_d) {
+          Kokkos::realloc(aL_x3f, nmb, ncells3, ncells2, ncells1);
+          Kokkos::realloc(dL_x3f, nmb, ncells3, ncells2, ncells1);
+          Kokkos::realloc(dR_x3f, nmb, ncells3, ncells2, ncells1);
+          Kokkos::realloc(vx_x3f, nmb, ncells3, ncells2, ncells1);
+          Kokkos::realloc(vy_x3f, nmb, ncells3, ncells2, ncells1);
+        }
+      }
 
       // allocate array of flags used with FOFC
       if (use_fofc) {

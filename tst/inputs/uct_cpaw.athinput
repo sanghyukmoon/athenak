@@ -1,0 +1,60 @@
+# UCT-HLLD / CT-Contact comparison with an exact circularly polarized Alfven wave.
+<job>
+basename = uct
+
+<mesh>
+nghost = 3
+nx1 = 32
+nx2 = 16
+nx3 = 16
+x1min = 0
+x1max = 2
+x2min = 0
+x2max = 1
+x3min = 0
+x3max = 1
+ix1_bc = periodic
+ox1_bc = periodic
+ix2_bc = periodic
+ox2_bc = periodic
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 32
+nx2 = 16
+nx3 = 16
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim = -1
+tlim = 1
+ndiag = 100000
+
+<mhd>
+eos = isothermal
+iso_sound_speed = 1
+reconstruct = plm
+rsolver = hlld
+fofc = false
+
+<problem>
+pgen_name = cpaw
+b_par = 1
+b_perp = 0.1
+pres = 0.1
+v_par = 0
+right_polar = true
+along_x1 = false
+along_x2 = false
+along_x3 = false
+
+<output1>
+file_type = rst
+single_file_per_rank = false
+dt = 999
