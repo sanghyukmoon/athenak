@@ -146,15 +146,39 @@ def check_errors(initial, final, path):
     return float(data[4])
 
 
+def write_input(template, destination, overrides):
+    """Materialize keys before startup; AthenaK CLI overrides cannot add keys."""
+    blocks = {}
+    block = None
+    for line in Path(template).read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line.startswith("<"):
+            block = line.strip("<>")
+            blocks.setdefault(block, {})
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            blocks[block][key.strip()] = value.strip()
+    for key, value in overrides.items():
+        block, name = key.split("/", 1)
+        values = blocks.setdefault(block, {})
+        if value is None:
+            values.pop(name, None)
+        else:
+            values[name] = str(value)
+    text = "\n".join("<%s>\n%s\n" % (block, "\n".join(
+        "%s = %s" % item for item in values.items())) for block, values in blocks.items())
+    Path(destination).write_text(text)
+
+
 def run_case(binary, input_file, directory, overrides=None, launcher=None, success=True):
     """Run in a new directory and retain logs/checkpoints on failure."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
-    flags = dict(overrides or {})
+    case_input = directory/"input.athinput"
+    write_input(input_file, case_input, dict(overrides or {}))
     if launcher is None:
         launcher = shlex.split(os.environ.get("UCT_LAUNCH", ""))
-    command = list(launcher) + [str(binary), "-i", str(input_file)]
-    command += ["%s=%s" % item for item in flags.items()]
+    command = list(launcher) + [str(binary), "-i", str(case_input.resolve())]
     result = subprocess.run(command, cwd=directory, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     (directory/"run.log").write_text(result.stdout)
@@ -203,7 +227,7 @@ def run_regressions(binary, input_file, root, full=True, baseline=None, donor=No
             ref = run_case(executable, input_file, root/label, opts)
             evidence[label+"_maxima"] = compare(small[method][1], ref[1])
     omitted = run_case(binary, input_file, root/"omitted", dimensions() |
-                       {"time/nlim": 2, "time/tlim": 100})
+                       {"time/nlim": 2, "time/tlim": 100, "mhd/emf": None})
     compare(omitted[1], small["ct_contact"][1])
     # The actual tests are multidimensional, so valid UCT calls enter CornerE.
     for axis in range(3):

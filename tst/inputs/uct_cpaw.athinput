@@ -42,6 +42,7 @@ iso_sound_speed = 1
 reconstruct = plm
 rsolver = hlld
 fofc = false
+emf = ct_contact
 
 <problem>
 pgen_name = cpaw
