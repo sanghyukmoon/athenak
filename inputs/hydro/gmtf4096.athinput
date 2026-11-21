@@ -3,6 +3,7 @@ problem   = gravo-magneto-turbulent fragmentation
 
 <job>
 basename  = GMTF       # problem ID: basename of output filenames
+report_timing = true   # report fenced gravity and output wall times at the end
 
 <output1>
 file_type   = hst

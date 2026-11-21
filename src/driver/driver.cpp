@@ -9,6 +9,8 @@
 #include <iostream>
 #include <iomanip>    // std::setprecision()
 #include <limits>
+#include <map>
+#include <sstream>
 #include <algorithm>
 #include <cstdlib>
 #include <string> // string
@@ -35,6 +37,19 @@
 #endif
 
 namespace {
+
+template <typename Function>
+void RunWithTiming(bool enabled, double &seconds, Function work) {
+  if (!enabled) {
+    work();
+    return;
+  }
+  Kokkos::fence();
+  Kokkos::Timer timer;
+  work();
+  Kokkos::fence();
+  seconds += timer.seconds();
+}
 
 [[noreturn]] void DriverFatalError(const char *file, int line, const std::string &msg) {
   std::cout << "### FATAL ERROR in " << file << " at line " << line << std::endl
@@ -97,8 +112,9 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
     }
   } // extra brace to limit scope of string
 
-  // read <time> parameters controlling driver if run requires time-evolution
+  // read driver parameters if run requires time-evolution
   if (time_evolution != TimeEvolution::tstatic) {
+    report_timing_ = pin->GetOrAddBoolean("job", "report_timing", true);
     integrator = pin->GetOrAddString("time", "integrator", "rk2");
     tlim = pin->GetReal("time", "tlim");
     nlim = pin->GetOrAddInteger("time", "nlim", -1);
@@ -575,8 +591,10 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         // AssembleSource() sums the registered contributions (gas, particles, ...)
         // into pgrav->rho first, so the solver only consumes that field.
         if (pmesh->pmb_pack->pgrav != nullptr) {
-          pmesh->pmb_pack->pgrav->AssembleSource();
-          pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);
+          RunWithTiming(report_timing_, gravity_seconds_, [&]() {
+            pmesh->pmb_pack->pgrav->AssembleSource();
+            pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);
+          });
         }
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
@@ -631,8 +649,10 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
 
         if (((out->out_params.dt > 0.0) && (time_32 >= next_32)) ||
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
-          out->LoadOutputData(pmesh);
-          out->WriteOutputFile(pmesh, pin);
+          RunWithTiming(report_timing_, out->elapsed_seconds, [&]() {
+            out->LoadOutputData(pmesh);
+            out->WriteOutputFile(pmesh, pin);
+          });
         }
       }
 
@@ -668,14 +688,16 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
   // Write a final checkpoint without advancing the output schedule.
   for (auto &out : pout->pout_list) {
     if (out->out_params.file_type == "rst") {
-      out->LoadOutputData(pmesh);
-      static_cast<RestartOutput *>(out)->WriteOutputFile(pmesh, pin, true);
+      RunWithTiming(report_timing_, out->elapsed_seconds, [&]() {
+        out->LoadOutputData(pmesh);
+        static_cast<RestartOutput *>(out)->WriteOutputFile(pmesh, pin, true);
+      });
     }
   }
 
   //TODO(SMOON) Temporarily moved this above pgen_final_func call to exclude final func
   //cost from the performance diagnostics
-  float exe_time = run_time_.seconds();
+  double exe_time = run_time_.seconds();
 
   // call any problem specific functions to do work after main loop
   if (pmesh->pgen->pgen_final_func != nullptr) {
@@ -725,9 +747,40 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       std::cout << "cpu time used  = " << exe_time << std::endl;
       std::cout << "zone-cycles/cpu_second = " << zcps << std::endl;
       std::cout << "particle-updates/cpu_second = " << pups << std::endl;
+      if (report_timing_) {ReportTiming(pout, exe_time, zonecycles);}
     }
   }
   return;
+}
+
+void Driver::ReportTiming(const Outputs *pout, double elapsed,
+                          std::uint64_t zonecycles) const {
+  std::map<std::string, double> seconds_by_type;
+  double output_seconds = 0.0;
+  for (const auto &out : pout->pout_list) {
+    seconds_by_type[out->out_params.file_type] += out->elapsed_seconds;
+    output_seconds += out->elapsed_seconds;
+  }
+
+  std::ostringstream report;
+  report << "\nWall time breakdown (rank 0)\n";
+  auto row = [&](const std::string &name, double seconds) {
+    double percent = elapsed > 0.0 ? 100.0 * seconds / elapsed : 0.0;
+    report << name << " = " << std::scientific << std::setprecision(6) << seconds
+           << " s (" << std::fixed << std::setprecision(2) << percent << "%)\n";
+  };
+  row("gravity solve", gravity_seconds_);
+  row("outputs", output_seconds);
+  for (const auto &entry : seconds_by_type) {
+    row("  " + entry.first, entry.second);
+  }
+  double non_output_seconds = elapsed - output_seconds;
+  row("remaining", non_output_seconds - gravity_seconds_);
+  if (non_output_seconds > 0.0) {
+    report << "zone-cycles/cpu_second excluding outputs = " << std::scientific
+           << std::setprecision(6) << zonecycles / non_output_seconds << '\n';
+  }
+  std::cout << report.str();
 }
 
 //----------------------------------------------------------------------------------------

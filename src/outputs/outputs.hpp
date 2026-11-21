@@ -216,6 +216,7 @@ class BaseTypeOutput {
 
   // data
   OutputParameters out_params;   // params read from <output> block for this type
+  double elapsed_seconds = 0.0;  // preparation and writes in the driver's timed window
   DvceArray5D<Real> derived_var; // array to store output variables computed from u0/b0
 
   // function which computes derived output variables like vorticity and current density

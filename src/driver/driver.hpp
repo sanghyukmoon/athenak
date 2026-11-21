@@ -75,6 +75,8 @@ class Driver {
 
  private:
   Kokkos::Timer run_time_;      // generalized timer for cpu/gpu/etc
+  bool report_timing_ = false;
+  double gravity_seconds_ = 0.0;
   std::uint64_t nmb_updated_;   // running total of MB updated during run
   std::uint64_t npart_updated_; // running total of particles updated during run
   float lb_efficiency_;         // measure of how efficient was load balancing
@@ -85,6 +87,7 @@ class Driver {
   void SetSTSStage(int stage);
   void EndSTSSweep();
   void OutputCycleDiagnostics(Mesh *pm);
+  void ReportTiming(const Outputs *pout, double elapsed, std::uint64_t zonecycles) const;
   Real UpdateWallClock();
 };
 #endif // DRIVER_DRIVER_HPP_
